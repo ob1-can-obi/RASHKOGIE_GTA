@@ -1,0 +1,1 @@
+source_file,line,global_index,step,ts,next_ts,reward,distance,previous_distance,progress,distance_term,progress_term,step_term,collision,collision_term,offroad,road_dist,offroad_term,goal_reached,goal_term,time_remaining,time_term

@@ -1,0 +1,12 @@
+Reward Head Stats
+=================
+
+jsonl files: 0
+rows: 0
+checkpoint: none, formula-based
+
+reward: no rows
+
+collision rows: 0
+offroad rows:   0
+goal rows:      0

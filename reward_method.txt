@@ -1,0 +1,60 @@
+Reward:
+
+r_t = -w_d * d_t
+      + w_p * (d_{t-1} - d_t)
+      - w_step
+      - w_C * C_t
+      - w_O * O_t
+      + R_goal * 1_goal
+      + w_T * T_remaining * 1_goal
+
+Where:
+- d_t: current distance to goal. (Displacement if the game allows it)
+- (d_{t-1} - d_t): progress made this step
+- w_step: small step penalty
+- C_t: collision term
+- O_t: off-track / off-road term
+- R_goal: reward for reaching goal
+- T_remaining: extra bonus for finishing earlier
+
+Practical notes:
+- If you already use progress reward, keep the distance term small, otherwise you may double-count.
+- The time remaining bonus is best added only when the goal is reached.
+- C_t and O_t can be binary or scaled by severity.
+
+One clean version:
+
+r_t = 0.1 * (-d_t)
+      + 1.0 * (d_{t-1} - d_t)
+      - 0.01
+      - 5 * C_t
+      - 1 * O_t
+      + 20 * 1_goal
+      + 0.1 * T_remaining * 1_goal
+
+Potential-style reward in simple English:
+
+It means:
+reward the agent for getting into a better state than before.
+
+So instead of:
+"you get reward because you are 40 meters from the goal"
+
+you say:
+"you get reward because you moved from 45 meters away to 40 meters away"
+
+That is why this term is nice:
+
+(d_{t-1} - d_t)
+
+Interpretation:
+- If the agent gets closer, reward is positive.
+- If it stays still, reward is near zero.
+- If it moves away, reward is negative.
+
+So in plain English:
+- absolute distance = "how far are you now?"
+- potential-style / progress reward = "did you improve from last step?"
+
+In your case, you are already basically using the simple version of potential-style reward
+when you use progress reward.

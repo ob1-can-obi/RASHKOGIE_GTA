@@ -1,0 +1,204 @@
+
+# =========================
+# V1 GTA driving input spec
+# =========================
+
+# output tensors
+# ego:      float32 [24]
+# entities: float32 [32, 24]
+# mask:     bool    [32]
+# scene:    float32 [16]
+# route:    float32 [8]
+
+# -------------------------
+# 1) EGO tensor: shape [24]
+# -------------------------
+# Use normalized float features only.
+# Suggested order:
+
+ego = [
+    px, py, pz,                  # 0:3   optional; keep if you want map/global awareness
+    vx, vy, vz,                  # 3:6
+    rx, ry, rz,                  # 6:9   or yaw/pitch/roll if you prefer
+    v_speed,                     # 9
+    v_throttle,                  # 10
+    v_brake,                     # 11
+    v_steer,                     # 12
+    v_rpm,                       # 13
+    v_gear,                      # 14
+    v_ax, v_ay, v_az,            # 15:18
+    v_heading,                   # 18
+    road_heading,                # 19
+    road_dist,                   # 20
+    hp / hp_max,                 # 21
+    armor / 100.0,               # 22
+    wanted / 5.0                 # 23
+]
+
+# Notes:
+# - normalize positions if you keep them, otherwise remove px/py/pz and replace with 3 zeros
+# - angles should be converted to sin/cos later if needed, but raw normalized degrees is okay for v1
+# - v_speed, v_ax, v_ay, v_az should be normalized by chosen constants
+
+
+# --------------------------------
+# 2) ENTITY tensor: shape [32, 24]
+# --------------------------------
+# Build one combined list from:
+#   near_vehs + near_peds + near_objects
+# Sort by:
+#   smallest dist first
+# Keep top 32
+# Pad with zeros if fewer than 32
+#
+# Each entity row should use ego-relative fields already present in dump.
+# Suggested order:
+
+entity_row = [
+    type_id,                     # 0   1=vehicle, 2=ped, 3=object
+    bucket_id,                   # 1   semantic bucket id
+    rel_fwd,                     # 2
+    rel_lat,                     # 3
+    rel_z,                       # 4
+    dist,                        # 5
+    dist3d,                      # 6
+    speed,                       # 7
+    rel_v_fwd,                   # 8
+    rel_v_lat,                   # 9
+    heading,                     # 10
+    hdiff,                       # 11
+    dim_w,                       # 12
+    dim_l,                       # 13
+    dim_h,                       # 14
+    is_static,                   # 15
+    has_collision,               # 16
+    is_visible,                  # 17
+    is_on_roadside,              # 18
+    ttc,                         # 19
+    extra_1,                     # 20
+    extra_2,                     # 21
+    extra_3,                     # 22
+    extra_4                      # 23
+]
+
+# Fill extras by entity type:
+# vehicle:
+#   extra_1 = class
+#   extra_2 = stopped
+#   extra_3 = occupants
+#   extra_4 = has_driver
+#
+# ped:
+#   extra_1 = hp / 200.0
+#   extra_2 = in_veh
+#   extra_3 = running
+#   extra_4 = walking or crossing
+#
+# object:
+#   extra_1 = attached
+#   extra_2 = 0
+#   extra_3 = 0
+#   extra_4 = 0
+
+# mask[i] = True if row i is real, False if padded
+
+
+# ---------------------------
+# 3) SCENE tensor: shape [16]
+# ---------------------------
+# Your dump does NOT contain a dense image/BEV scene tensor.
+# So for V1, make scene a compact global-context vector.
+
+scene = [
+    road_heading,                # 0
+    road_dist,                   # 1
+    weather,                     # 2
+    rain,                        # 3
+    wind_speed,                  # 4
+    wind_x,                      # 5
+    wind_y,                      # 6
+    clock_h / 24.0,              # 7
+    clock_m / 60.0,              # 8
+    clock_s / 60.0,              # 9
+    near_total / 1000.0,         # 10
+    len(near_vehs) / 32.0,       # 11
+    len(near_peds) / 32.0,       # 12
+    len(near_objects) / 256.0,   # 13
+    nearest_vehicle_dist,        # 14
+    nearest_object_dist          # 15
+]
+
+# nearest_vehicle_dist = min(dist of near_vehs) else large default
+# nearest_object_dist  = min(dist of near_objects) else large default
+
+
+# --------------------------
+# 4) ROUTE tensor: shape [8]
+# --------------------------
+# Use waypoint and goal-related features.
+# Your dump has wp_x, wp_y, wp_dist. :contentReference[oaicite:2]{index=2}
+
+route = [
+    wp_x,                        # 0
+    wp_y,                        # 1
+    wp_dist,                     # 2
+    has_waypoint,                # 3   1 if wp_dist > 0 else 0
+    wp_rel_fwd,                  # 4
+    wp_rel_lat,                  # 5
+    goal_heading_diff,           # 6
+    urgency                       # 7
+]
+
+# Compute:
+# - has_waypoint = 1.0 if wp_dist > 0 else 0.0
+# - wp_rel_fwd / wp_rel_lat = waypoint projected into ego vehicle frame
+# - goal_heading_diff = angle between ego forward heading and waypoint direction
+# - urgency = optional; set 0 for now if you do not yet have time budget
+
+
+# -------------------
+# 5) normalization
+# -------------------
+# Suggested clipping / scaling:
+# rel_fwd, rel_lat: divide by 100
+# rel_z: divide by 20
+# dist, dist3d: divide by 100
+# speed, v_speed: divide by 50
+# rel_v_fwd, rel_v_lat: divide by 30
+# angles (heading, hdiff, road_heading, v_heading, rz): divide by 180
+# dimensions: divide by 10
+# ttc: clip to [0, 10], then divide by 10
+# positions px, py, pz: either standardize globally or drop for V1
+
+
+# -------------------
+# 6) sorting rule
+# -------------------
+# Combine all entities into one list and sort by:
+#   (dist ascending, ttc ascending if available)
+# Then keep top 32.
+
+ego [24] ---------> ego MLP ----------> ego_emb [64]
+scene [16] -------> scene MLP --------> scene_emb [64]
+route [8] --------> route MLP --------> route_emb [64]
+
+entities [32,24] -> shared entity MLP -> entity_embs [32,64]
+mask [32] ----------------------------------------------┘
+
+ego_emb + scene_emb + route_emb
+            │
+            ▼
+      query MLP -> q [64]
+
+entity_embs -> key MLP   -> K [32,64]
+entity_embs -> value MLP -> V [32,64]
+
+attention(q, K, V, mask)
+            │
+            ▼
+    entity_context [64]
+
+concat:
+[ego_emb | scene_emb | route_emb | entity_context] -> [256]
+
+fusion MLP -> z_t [128]

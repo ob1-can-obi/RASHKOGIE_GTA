@@ -1,0 +1,11 @@
+{
+  "base_vocab_size": 362,
+  "total_vocab_size": 874,
+  "merge_count": 512,
+  "encoded_length": 35752,
+  "longest_token_id": 764,
+  "longest_token_frames": 256,
+  "snapshot_name": "tokenizer_20260428_134609",
+  "lookup_path": "/mnt/c/Users/laksh/OneDrive/Documents/rash_kog/tokenizer/training_data/snapshots/tokenizer_20260428_134609_lookup.json",
+  "chunks_path": "/mnt/c/Users/laksh/OneDrive/Documents/rash_kog/tokenizer/training_data/snapshots/tokenizer_20260428_134609_chunks.json"
+}

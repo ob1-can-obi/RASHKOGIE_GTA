@@ -1,0 +1,89 @@
+RASH KOG coding preferences
+===========================
+
+Model code style
+----------------
+- Keep the main model as one readable function.
+- Do not split the model into builder/encoder/forward helper functions unless explicitly asked.
+- Write model code sequentially, like a notebook:
+  Step 1, Step 2, Step 3, with comments explaining tensor shapes and purpose.
+- Prefer plain Python and simple PyTorch modules.
+- Avoid fancy abstractions, classes, dataclasses, decorators, factories, and clever helper layers for the core model.
+- The action planner in driving_model/action_planner.py should stop at the final planner tensor.
+- Do not put GTA control, game execution, label generation, training loops, or file saving into driving_model.
+
+Folder ownership
+----------------
+- driving_model/ is for simple model code only.
+- gta_stream/ is for GTA pipes, control commands, game adapters, and execution.
+- action_planner_training/ is for action-planner training, labels, live training loops, checkpoints, and action-planner-specific training data.
+- action-planner training data belongs in action_planner_training/training_data/.
+- intuition_head/ is for intuition-head model code, labels/samples, checkpoints, and intuition-head-specific training data.
+- intuition-head training data belongs in intuition_head/training_data/.
+- reward_head/ is for reward calculation, reward logs, and reward-specific notes.
+- reward-head logs belong in reward_head/training_data/.
+- Each head folder should keep its own stats script, CSV, summary, and graph files.
+
+Action planner output
+---------------------
+- The planner output is one plain tensor.
+- Current layout:
+  [0:5]   strength     = steer, throttle, brake, handbrake, enabled
+  [5:10]  active_prob  = steer, throttle, brake, handbrake, enabled
+  [10:15] duration_s   = steer, throttle, brake, handbrake, enabled
+- Use sigmoid probabilities during training.
+- Threshold active probabilities only outside the model for inference/game execution.
+- Time/duration must be positive, preferably sigmoid-mapped or softplus-mapped.
+
+Training
+--------
+- Live training should compare planner output against actual player inputs from GTA:
+  u_steer, u_throttle, u_brake, u_handbrake.
+- Duration labels should be computed from future frames.
+- The intuition head should train from current z_t + actual action tensor to next frame z_t.
+- Each head should save weights in its own folder so training can resume.
+- The reward head should calculate reward from the frame before an action and the frame after that action.
+- The reward head is formula-based unless explicitly changed into a neural model.
+- Training can be split into peripheral functions, but the model itself should remain one function.
+- Training sessions should refresh per-folder CSV and SVG graphs after the session ends.
+- Live training should write readable session logs in action_planner_training/logs, intuition_head/logs, and reward_head/logs.
+
+Reward
+------
+- Use the formula in reward_method.txt:
+  distance penalty + progress reward + step penalty + collision penalty + off-road penalty + goal bonus + time bonus.
+- d_t comes from wp_dist.
+- Progress is previous wp_dist - current wp_dist.
+- Collision is estimated from frame-to-frame hp, v_engine_hp, and v_body_hp damage.
+- Off-road is estimated from road_dist above the configured threshold.
+- Time bonus is only added when the goal is reached.
+
+Tokenizer
+---------
+- tokenizer/ is for the BPE-based control tokenizer.
+- tokenizer training data belongs in tokenizer/training_data/.
+- Each raw control frame is quantized into integer bins (right_steer, left_steer,
+  forward_throttle, brake) with 8 bins per axis (step = 1/7, bins 0-7).
+- Each unique bin combination becomes one base token.
+- BPE merges compress frequently repeated adjacent pairs into longer tokens.
+- TOKEN_END (id = -1) is a reserved sentinel that marks session boundaries.
+  It is appended after each capture session so the model knows when a driving
+  session ended.  BPE merges never bridge across TOKEN_END.
+- Each capture file (.jsonl) is treated as one session.  When building the
+  tokenizer or encoding frames, TOKEN_END is inserted between sessions
+  automatically.
+- Workflow:
+  1. Capture controls while driving:  python tokenizer/tokenizer.py capture
+  2. Build/resume tokenizer:          python tokenizer/tokenizer.py build
+- encode_control_frames() appends TOKEN_END by default (append_end=True).
+- decode_token_ids() silently skips TOKEN_END entries.
+- The training loop should treat TOKEN_END as a sequence boundary: reset hidden
+  state or skip the transition when it appears.
+
+General coding preferences
+--------------------------
+- Favor simple, direct code over generic reusable frameworks.
+- Use comments to explain the flow.
+- Keep files easy to read and easy to change.
+- Do not add unrelated refactors.
+- When unsure, ask before changing the architecture.

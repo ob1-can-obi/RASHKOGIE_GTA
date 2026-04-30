@@ -1,0 +1,179 @@
+ego + entities + scene + route + time/deadline context
+                        │
+                        ▼
+                ┌───────────────────────┐
+                │  ENCODERS + ATTENTION │
+                │-----------------------│
+                │ ego encoder           │
+                │ entity encoder        │
+                │ scene encoder         │
+                │ route encoder         │
+                │ time encoder          │
+                └───────────┬───────────┘
+                            │
+                            ▼
+                 current fused embedding z_t
+                            │
+        ┌───────────────────┴───────────────────┐
+        │                                       │
+        ▼                                       ▼
+┌───────────────────────┐           ┌──────────────────────────┐
+│  ACTION PLANNER       │           │  EXTERNAL TIME CONTROL   │
+│-----------------------│           │--------------------------│
+│ planner(z_t)          │           │ current_time = τ_ext     │
+│ -> top-k action tokens│           │ deadline     = T_goal    │
+│ -> token ids          │           │ time_left    = ΔT_t      │
+│ -> token scores       │           │ urgency      = u_t       │
+│ -> token durations    │           │ search budget B_t        │
+│                       │           │ max depth D_t            │
+│ output:               │           │ think-cost λ_t           │
+│ top-k candidates      │           │ commit threshold θ_t     │
+└───────────┬───────────┘           └───────────┬──────────────┘
+            │                                   │
+            └─────────────────┬─────────────────┘
+                              ▼
+                  ┌─────────────────────────────┐
+                  │   FRAME-LOCAL SEARCH TREE   │
+                  │-----------------------------│
+                  │ root = (z_t, depth=0, B_t,  │
+                  │         D_t)                │
+                  │                             │
+                  │ each node stores:           │
+                  │ - z_n                       │
+                  │ - candidate tokens          │
+                  │ - opened children           │
+                  │ - next unopened index       │
+                  │ - child states z_child      │
+                  │ - r_edge                    │
+                  │ - N, W, Q, depth           │
+                  │ - parent pointer            │
+                  │ - risk / route summaries    │
+                  └─────────────┬───────────────┘
+                                │
+                                ▼
+                     for each candidate token_j
+                                │
+                                ▼
+                  ┌─────────────────────────────┐
+                  │       INTUITION HEAD        │
+                  │-----------------------------│
+                  │ intuition(z_n, token_j,     │
+                  │           duration_j)       │
+                  │ -> predicted future state   │
+                  │    z_child                  │
+                  └─────────────┬───────────────┘
+                                │
+                                ▼
+                  ┌─────────────────────────────┐
+                  │   REWARD / NODE EVALUATOR   │
+                  │-----------------------------│
+                  │ reward_fn(z_n, z_child,     │
+                  │           duration_j,       │
+                  │           time_left)        │
+                  │ -> r_edge                   │
+                  │                             │
+                  │ example terms:              │
+                  │ - distance penalty          │
+                  │ + progress reward           │
+                  │ - step penalty              │
+                  │ - collision penalty         │
+                  │ - offroad penalty           │
+                  │ + goal bonus                │
+                  │ + early-finish bonus        │
+                  │ - think cost                │
+                  └─────────────┬───────────────┘
+                                │
+                                ▼
+                  child node gets:
+                  - child.z      = z_child
+                  - child.r_edge = r_edge
+                  - child.token  = token_j
+
+                                │
+                                ▼
+                  ┌─────────────────────────────┐
+                  │       METACONTROLLER        │
+                  │-----------------------------│
+                  │ input:                      │
+                  │ - latest real z_t          │
+                  │ - current running token    │
+                  │ - token total duration     │
+                  │ - token remaining duration │
+                  │ - elapsed ratio            │
+                  │ - tree root                │
+                  │ - child Q / priors / reward│
+                  │ - urgency / time left      │
+                  │                             │
+                  │ output:                     │
+                  │ - KEEP                      │
+                  │ - INTERRUPT                 │
+                  │ - COMMIT_NEXT               │
+                  │ - selected token id         │
+                  └─────────────┬───────────────┘
+                                │
+                                ▼
+                  ┌─────────────────────────────┐
+                  │   OUTER EXECUTION CODE      │
+                  │-----------------------------│
+                  │ latest committed output     │
+                  │ takes precedence            │
+                  │ execute chosen token        │
+                  │ frame by frame              │
+                  └─────────────┬───────────────┘
+                                │
+                                ▼
+                              GTA
+                                │
+                                ▼
+                       reward / next frame
+                                │
+                                ▼
+                    updated real state -> z_t
+
+Penalties can be: Cost of delay + cost of thinking. Each "think more" will increase the cost.
+
+Macro actions can be a final tensor with the values of the inputs or the inputs that need to be activated.
+
+EPISODE LOOP: repeat until GTA episode ends
+│
+├── get current GTA observation o_t
+│
+├── FRAME LOOP (one planning cycle for one GTA frame)
+│   │
+│   ├── encode observation
+│   │      ego + entities + scene + route
+│   │                ↓
+│   │        encoders + attention
+│   │                ↓
+│   │           fused embedding z_t
+│   │
+│   ├── planner proposes root candidates
+│   │      planner(z_t) -> top-k macro-actions + soft priors
+│   │
+│   ├── initialize frame-local search tree T_t
+│   │      root.z = z_t
+│   │      root.candidate_list = planner output
+│   │      root.next_unopened_index = 0
+│   │      root.children = []
+│   │
+│   ├── open first root candidate
+│   │      OPEN_NEXT_HERE(root)
+│   │
+│   ├── ROOT SEARCH LOOP
+│   │      repeat until root says COMMIT
+│   │      or search budget exhausted
+│   │
+│   │      └── call NODE LOOP on root
+│   │
+│   ├── chosen root macro-action
+│   │          ↓
+│   │    Action / Control Head
+│   │    action_head(z_t, chosen_macro_action)
+│   │          ↓
+│   │   steer / throttle / brake
+│   │
+│   ├── execute controls in GTA
+│   │
+│   └── receive next observation + reward
+│
+└── continue to next frame
