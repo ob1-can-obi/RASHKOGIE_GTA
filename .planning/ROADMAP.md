@@ -81,7 +81,14 @@ Plans:
   4. Reaching the configured convergence threshold for intuition head and reward head automatically freezes those modules — gradients are blocked in all downstream consumers
   5. Metacontroller RL training only begins after intuition head and reward head are frozen — the reward target does not move during metacontroller policy updates
   6. A full end-to-end training run can be started, progressed through all module stages, and evaluated as a loop: capture data → train in order → run agent → evaluate
-**Plans**: TBD
+**Plans:** 5 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Shared infrastructure: training_config.json, ConvergenceDetector, freeze_module, training_data dirs, test scaffold (PIPE-01, PIPE-05, PIPE-06)
+- [ ] 04-02-PLAN.md — Encoder + intuition head joint training script (PIPE-02)
+- [ ] 04-03-PLAN.md — Reward head offline training script (PIPE-03)
+- [ ] 04-04-PLAN.md — Action planner imitation learning script (PIPE-04)
+- [ ] 04-05-PLAN.md — Coordinator CLI and end-to-end pipeline integration (PIPE-07)
 
 ### Phase 5: Training Dashboard
 **Goal**: Live training metrics, decision distributions, and hyperparameter controls are accessible from a browser during any training session
@@ -106,5 +113,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
-| 4. Module Training Pipelines | 0/TBD | Not started | - |
+| 4. Module Training Pipelines | 0/5 | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
