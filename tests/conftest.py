@@ -7,10 +7,15 @@ from torch import nn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 METACONTROLLER_DIR = PROJECT_ROOT / "metacontroller"
-if str(METACONTROLLER_DIR) not in sys.path:
-    sys.path.insert(0, str(METACONTROLLER_DIR))
+MAIN_MODEL_DIR = PROJECT_ROOT / "main_model"
+
+for d in (METACONTROLLER_DIR, MAIN_MODEL_DIR, str(PROJECT_ROOT)):
+    if str(d) not in sys.path:
+        sys.path.insert(0, str(d))
 
 from metacontroller import MetaMLP
+from main_model import create_encoder_weights
+from training_utils import load_training_config
 
 
 @pytest.fixture
@@ -126,3 +131,45 @@ def _make_trajectory_dict(input_dim=10, n_steps=3):
             "state_after": {"dummy": 5},
         },
     }
+
+
+# =========================================================================
+# Phase 4: Module Training Pipelines fixtures
+# =========================================================================
+
+@pytest.fixture
+def mock_encoder_weights():
+    """Fresh encoder weights dict from create_encoder_weights()."""
+    return create_encoder_weights()
+
+
+@pytest.fixture
+def mock_state_pair():
+    """
+    Synthetic GTA state pair (state_t, state_t1) for encoder training tests.
+
+    state_t1 has wp_dist=9.5 (closer to goal than state_t wp_dist=10.0),
+    simulating forward progress.
+    """
+    base_state = {
+        "near_entities": [],
+        "near_vehs": [],
+        "near_peds": [],
+        "near_objects": [],
+        "wp_dist": 10.0,
+        "hp": 100.0,
+        "v_engine_hp": 1000.0,
+        "v_body_hp": 1000.0,
+        "road_dist": 0.5,
+        "dead": False,
+    }
+    state_t = dict(base_state)
+    state_t1 = dict(base_state)
+    state_t1["wp_dist"] = 9.5  # closer to goal, showing progress
+    return (state_t, state_t1)
+
+
+@pytest.fixture
+def mock_training_config():
+    """Training config dict loaded from training_config.json."""
+    return load_training_config()
