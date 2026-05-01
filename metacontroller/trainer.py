@@ -368,6 +368,7 @@ def train_step(
     nodes_expanded=0,
     token_duration_frames=1,
     entropy_coeff=0.05,
+    training_state=None,  # TrainingState for batch mode (Phase 2)
 ):
     """
     Full learning cycle after one token execution.
@@ -415,11 +416,27 @@ def train_step(
         token_duration_frames=token_duration_frames,
     )
 
-    # step 4: weight update
-    total_loss = update_metapolicy(
-        meta_mlp, meta_trajectory, advantages, lr=lr,
-        entropy_coeff=entropy_coeff,
-    )
+    # step 4: weight update (batch mode vs legacy single-sample mode)
+    if training_state is not None:
+        # Batch mode: buffer the trajectory, defer update
+        trajectory_dict = {
+            "meta_trajectory": meta_trajectory,
+            "realized_return": token_return,
+            "is_fallback": is_fallback,
+            "nodes_expanded": nodes_expanded,
+            "token_duration_frames": token_duration_frames,
+            "rollout": rollout,
+            "advantages": advantages,
+        }
+        batch_ready = training_state.add_trajectory(trajectory_dict)
+        total_loss = 0.0  # No immediate update
+    else:
+        # Legacy single-sample mode (backward compatible)
+        total_loss = update_metapolicy(
+            meta_mlp, meta_trajectory, advantages, lr=lr,
+            entropy_coeff=entropy_coeff,
+        )
+        batch_ready = False
 
     return {
         "token_return":   token_return,
@@ -429,6 +446,7 @@ def train_step(
         "n_search_steps": len(meta_trajectory),
         "is_fallback":    is_fallback,
         "entropy_coeff":  entropy_coeff,
+        "batch_ready":    batch_ready,  # True when buffer is full (Phase 2)
     }
 
 

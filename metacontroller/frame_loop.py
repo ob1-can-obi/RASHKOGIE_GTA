@@ -35,7 +35,7 @@ if str(MAIN_MODEL_DIR) not in sys.path:
 from executor import execution_init, execution_frame, get_rollout
 from search_tree import search_init, search_step
 from time_context import time_context
-from trainer import train_step, train_reward_head
+from trainer import train_step, train_reward_head, TrainingState
 
 
 def run_frame(
@@ -138,6 +138,8 @@ def drive_token(
     rf_predictor=None,
     planner_mlp=None,
     meta_mlp=None,
+    training_state=None,  # TrainingState for batch training (Phase 2)
+    checkpoint_dir=None,  # checkpoint save directory (Phase 2)
     embed_dim=32,
     hidden_dim=128,
     top_k=3,
@@ -273,20 +275,57 @@ def drive_token(
         is_fallback        = is_fallback,
         nodes_expanded     = search_state.nodes_expanded,
         token_duration_frames = token_duration,
+        training_state     = training_state,  # Phase 2: batch mode
     )
+
+    # -----------------------------------------------------------------
+    # batch update (Phase 2): when buffer is full, run batch Adam updates
+    # -----------------------------------------------------------------
+
+    meta_batch_result = None
+    reward_batch_result = None
+
+    if training_state is not None and meta_result["batch_ready"]:
+        batch = training_state.get_batch()
+        meta_batch_result = training_state.update_metapolicy_batch(
+            search_state.meta_mlp, batch,
+        )
+        reward_batch_result = training_state.update_reward_batch(
+            search_state.reward_mlp, search_state.rf_predictor,
+            batch, encode_fn, hidden_dim=hidden_dim,
+        )
+
+        # Checkpoint save after every batch update (BATCH-05)
+        if checkpoint_dir is not None:
+            training_state.save_checkpoint(
+                checkpoint_dir,
+                search_state.meta_mlp,
+                search_state.reward_mlp,
+                search_state.rf_predictor,
+            )
 
     # -----------------------------------------------------------------
     # train reward head + rf_predictor against realized token return
     # -----------------------------------------------------------------
 
-    reward_result = train_reward_head(
-        rollout        = rollout,
-        token_return   = meta_result["token_return"],
-        encode_fn      = encode_fn,
-        reward_mlp     = search_state.reward_mlp,
-        rf_predictor   = search_state.rf_predictor,
-        hidden_dim     = hidden_dim,
-    )
+    if training_state is None:
+        # Legacy single-sample mode
+        reward_result = train_reward_head(
+            rollout        = rollout,
+            token_return   = meta_result["token_return"],
+            encode_fn      = encode_fn,
+            reward_mlp     = search_state.reward_mlp,
+            rf_predictor   = search_state.rf_predictor,
+            hidden_dim     = hidden_dim,
+        )
+    else:
+        # Batch mode: reward update already handled above (or deferred)
+        reward_result = {
+            "reward_loss": reward_batch_result["reward_loss"] if reward_batch_result else 0.0,
+            "rf_loss": reward_batch_result["rf_loss"] if reward_batch_result else 0.0,
+            "reward_mlp": search_state.reward_mlp,
+            "rf_predictor": search_state.rf_predictor,
+        }
 
     return {
         "rollout":       rollout,
@@ -294,12 +333,15 @@ def drive_token(
         "search_state":  search_state,
         "interrupted":   interrupted,
         "meta_mlp":      search_state.meta_mlp,
-        "reward_mlp":    reward_result["reward_mlp"],
-        "rf_predictor":  reward_result["rf_predictor"],
+        "reward_mlp":    search_state.reward_mlp if training_state is None else reward_result["reward_mlp"],
+        "rf_predictor":  search_state.rf_predictor if training_state is None else reward_result["rf_predictor"],
         "planner_mlp":   search_state.planner_mlp,
-        "meta_loss":     meta_result["total_loss"],
+        "meta_loss":     meta_batch_result["loss"] if meta_batch_result else meta_result["total_loss"],
         "reward_loss":   reward_result["reward_loss"],
         "rf_loss":       reward_result["rf_loss"],
         "token_return":  meta_result["token_return"],
         "is_fallback":   is_fallback,
+        "batch_ready":   meta_result["batch_ready"],  # Phase 2: batch trigger flag
+        "meta_batch_result": meta_batch_result,        # Phase 2: None or batch update dict
+        "reward_batch_result": reward_batch_result,    # Phase 2: None or batch update dict
     }
