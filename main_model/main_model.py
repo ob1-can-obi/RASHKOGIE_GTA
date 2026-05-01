@@ -198,7 +198,13 @@ def create_encoder_weights(
     fusion_mlp = nn.Sequential(
         nn.Linear(embed_dim * 4, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, fused_dim),
     )
-    qw, kw, vw, ow = create_multi_head_attention_weights(embed_dim * 3, embed_dim)
+    # Attention block 1 (query from ego+scene+route concat, dim=embed_dim*3)
+    qw1, kw1, vw1, ow1 = create_multi_head_attention_weights(embed_dim * 3, embed_dim)
+    ln_attn1 = nn.LayerNorm(embed_dim)
+
+    # Attention block 2 (query from block 1 output, dim=embed_dim)
+    qw2, kw2, vw2, ow2 = create_multi_head_attention_weights(embed_dim, embed_dim)
+    ln_attn2 = nn.LayerNorm(embed_dim)
 
     return {
         "ego_mlp":    ego_mlp,
@@ -206,7 +212,8 @@ def create_encoder_weights(
         "route_mlp":  route_mlp,
         "entity_mlp": entity_mlp,
         "fusion_mlp": fusion_mlp,
-        "qw": qw, "kw": kw, "vw": vw, "ow": ow,
+        "qw1": qw1, "kw1": kw1, "vw1": vw1, "ow1": ow1, "ln_attn1": ln_attn1,
+        "qw2": qw2, "kw2": kw2, "vw2": vw2, "ow2": ow2, "ln_attn2": ln_attn2,
         "embed_dim": embed_dim,
         "num_heads": num_heads,
     }
@@ -235,17 +242,32 @@ def encode_state(raw_state, weights):
     entity_embs = weights["entity_mlp"](t["entities"])
 
     query_input = torch.cat([ego_emb, scene_emb, route_emb], dim=-1)
-    attn = multi_head_attention(
+
+    # Block 1: cross-attention from ego/scene/route query to entity K/V
+    attn1 = multi_head_attention(
         query_input = query_input,
         entity_embs = entity_embs,
         mask        = t["mask"],
-        qw          = weights["qw"],
-        kw          = weights["kw"],
-        vw          = weights["vw"],
-        ow          = weights["ow"],
+        qw          = weights["qw1"],
+        kw          = weights["kw1"],
+        vw          = weights["vw1"],
+        ow          = weights["ow1"],
         num_heads   = weights["num_heads"],
     )
-    entity_context = attn["entity_context"]
+    ctx1 = weights["ln_attn1"](attn1["entity_context"])  # [1, 64]
+
+    # Block 2: refine using block 1 output as query, same entity K/V
+    attn2 = multi_head_attention(
+        query_input = ctx1,
+        entity_embs = entity_embs,
+        mask        = t["mask"],
+        qw          = weights["qw2"],
+        kw          = weights["kw2"],
+        vw          = weights["vw2"],
+        ow          = weights["ow2"],
+        num_heads   = weights["num_heads"],
+    )
+    entity_context = weights["ln_attn2"](attn2["entity_context"] + ctx1)  # residual + LN
 
     fusion_input = torch.cat([ego_emb, scene_emb, route_emb, entity_context], dim=-1)
     z_t = weights["fusion_mlp"](fusion_input)

@@ -67,9 +67,11 @@ def action_planner(
 
     if planner_mlp is None:
         planner_mlp = nn.Sequential(
-            nn.Linear(fused_dim * 2, hidden_dim),
+            nn.Linear(fused_dim * 2, hidden_dim * 2),  # 256 -> 256
             nn.ReLU(),
-            nn.Linear(hidden_dim, vocab_size),
+            nn.Linear(hidden_dim * 2, hidden_dim),      # 256 -> 128
+            nn.ReLU(),
+            nn.Linear(hidden_dim, vocab_size),           # 128 -> V
         )
 
     # -------------------------------------------------------------------------
