@@ -112,8 +112,8 @@ Plans:
 - [x] 05-06-PLAN.md — Training script modifications: JSONL schema extension and WebSocket hot-reload client (DASH-02, DASH-03, DASH-07, DASH-08)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 05-03-PLAN.md — Metrics and params REST routes, WebSocket endpoints, server wiring (DASH-02, DASH-03, DASH-04, DASH-07, DASH-08)
-- [ ] 05-04-PLAN.md — Sessions, checkpoints, embeddings, and predictions REST routes (DASH-05, DASH-06)
+- [x] 05-03-PLAN.md — Metrics and params REST routes, WebSocket endpoints, server wiring (DASH-02, DASH-03, DASH-04, DASH-07, DASH-08)
+- [x] 05-04-PLAN.md — Sessions, checkpoints, embeddings, and predictions REST routes (DASH-05, DASH-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 05-05-PLAN.md — Vue 3 SPA frontend with all 7 sidebar views, Chart.js charts, and build (DASH-01 through DASH-08)
@@ -129,4 +129,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
 | 4. Module Training Pipelines | 6/6 | Complete | 2026-05-01 |
-| 5. Training Dashboard | 3/6 | Executing (Wave 1 done) | - |
+| 5. Training Dashboard | 5/6 | Executing (Wave 2 done) | - |
