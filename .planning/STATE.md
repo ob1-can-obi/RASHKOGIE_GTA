@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 1 of 5 (Training Correctness)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: Executing
-Last activity: 2026-05-01 — Completed 01-01 (Categorical Sampling Fix)
+Last activity: 2026-05-01 — Completed 01-02 (Reward Signal Fixes)
 
-Progress: [██░░░░░░░░] 7%
+Progress: [███░░░░░░░] 14%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 165s
-- Total execution time: ~3 min
+- Total plans completed: 2
+- Average duration: 184s
+- Total execution time: ~6 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 1 | 165s | 165s |
+| 01 | 2 | 368s | 184s |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (165s)
-- Trend: N/A (first plan)
+- Last 5 plans: 01-01 (165s), 01-02 (203s)
+- Trend: Stable
 
 *Updated after each plan completion*
 
@@ -44,6 +44,9 @@ Recent decisions affecting current work:
 
 - 01-01: training=False default preserves backward compatibility -- no caller changes needed
 - 01-01: Categorical(logits=) used instead of softmax+Categorical(probs=) for numerical stability
+- 01-02: NOT_READY_C=0.1, LAZY_K=0.05, MIN_SEARCH_NODES=2 -- moderate penalty constants that guide without dominating
+- 01-02: Duration normalization applied BEFORE penalty injection to avoid double-scaling (Pitfall 5)
+- 01-02: Not-ready penalty REPLACES final reward; lazy penalty ADDS to it -- different severity levels
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
@@ -71,5 +74,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 01-01-PLAN.md (Categorical Sampling Fix)
-Resume file: .planning/phases/01-training-correctness/01-01-SUMMARY.md
+Stopped at: Completed 01-02-PLAN.md (Reward Signal Fixes)
+Resume file: .planning/phases/01-training-correctness/01-02-SUMMARY.md
