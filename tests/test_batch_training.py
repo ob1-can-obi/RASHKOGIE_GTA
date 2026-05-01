@@ -22,6 +22,8 @@ if str(TESTS_DIR) not in sys.path:
 
 from trainer import (
     TrainingState,
+    train_step,
+    compute_token_return,
     get_entropy_coeff,
     DEFAULT_BATCH_SIZE,
     DEFAULT_BUFFER_CAPACITY,
@@ -868,3 +870,287 @@ def test_checkpoint_resume_all_six_modules(tmp_path):
                 f"Module '{name}' param {i} not restored: "
                 f"max diff = {(p_orig - p_loaded.data).abs().max().item()}"
             )
+
+
+# =========================================================================
+# Integration: train_step buffering with TrainingState
+# =========================================================================
+
+class MockTreeNode:
+    """Minimal tree node mock for train_step's backup_tree call."""
+    def __init__(self):
+        self.children = []
+        self.n = 0
+        self.w = 0.0
+        self.q = 0.0
+
+
+class MockChildNode:
+    """Child node with a token_id for backup_tree matching."""
+    def __init__(self, token_id):
+        self.token_id = token_id
+        self.n = 0
+        self.w = 0.0
+        self.q = 0.0
+
+
+def _make_root_with_child(token_id=42):
+    """Create a mock root with one child matching the committed token_id."""
+    root = MockTreeNode()
+    child = MockChildNode(token_id)
+    root.children.append(child)
+    return root
+
+
+def test_train_step_buffers_with_training_state():
+    """
+    Integration: train_step with training_state buffers trajectories
+    instead of updating weights immediately. After 3 calls with batch_size=4,
+    the buffer should have 3 entries and batch_ready should be False.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=4, buffer_capacity=100)
+
+    rollout = {
+        "token_id": 42, "duration": 5,
+        "states": [{"dummy": i} for i in range(6)],
+        "rewards": [0.1, 0.2, 0.15, 0.1, 0.05],
+        "components": [{"speed_reward": 0.1} for _ in range(5)],
+        "state_before": {"dummy": 0}, "state_after": {"dummy": 5},
+    }
+
+    results = []
+    for _ in range(3):
+        meta_traj = [
+            {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+            {"decision": 1, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+            {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        ]
+        root = _make_root_with_child(42)
+        result = train_step(
+            rollout=rollout,
+            root=root,
+            committed_token_id=42,
+            meta_trajectory=meta_traj,
+            meta_mlp=meta,
+            training_state=ts,
+        )
+        results.append(result)
+
+    assert ts.trajectories_since_update == 3, (
+        f"Expected 3 trajectories in buffer, got {ts.trajectories_since_update}"
+    )
+    assert len(ts.buffer) == 3, (
+        f"Buffer should have 3 entries, got {len(ts.buffer)}"
+    )
+    assert all(r["batch_ready"] is False for r in results), (
+        f"All 3 calls should return batch_ready=False, got {[r['batch_ready'] for r in results]}"
+    )
+
+
+def test_train_step_triggers_batch_on_full():
+    """
+    Integration: train_step with training_state=TrainingState(batch_size=2)
+    returns batch_ready=True on the 2nd call.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=2, buffer_capacity=100)
+
+    rollout = {
+        "token_id": 42, "duration": 5,
+        "states": [{"dummy": i} for i in range(6)],
+        "rewards": [0.1, 0.2, 0.15, 0.1, 0.05],
+        "components": [{"speed_reward": 0.1} for _ in range(5)],
+        "state_before": {"dummy": 0}, "state_after": {"dummy": 5},
+    }
+
+    results = []
+    for _ in range(2):
+        meta_traj = [
+            {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+            {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+        ]
+        root = _make_root_with_child(42)
+        result = train_step(
+            rollout=rollout,
+            root=root,
+            committed_token_id=42,
+            meta_trajectory=meta_traj,
+            meta_mlp=meta,
+            training_state=ts,
+        )
+        results.append(result)
+
+    assert results[0]["batch_ready"] is False, (
+        f"1st call should return batch_ready=False, got {results[0]['batch_ready']}"
+    )
+    assert results[1]["batch_ready"] is True, (
+        f"2nd call should return batch_ready=True, got {results[1]['batch_ready']}"
+    )
+
+
+def test_train_step_legacy_mode():
+    """
+    Integration: train_step WITHOUT training_state parameter should
+    still perform an immediate weight update (backward compatible).
+    Returns a dict with total_loss as a non-zero float and batch_ready=False.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    meta_traj = [
+        {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        {"decision": 1, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+        {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+    ]
+    rollout = {
+        "token_id": 42, "duration": 5,
+        "states": [{"dummy": i} for i in range(6)],
+        "rewards": [0.1, 0.2, 0.15, 0.1, 0.05],
+        "components": [{"speed_reward": 0.1} for _ in range(5)],
+        "state_before": {"dummy": 0}, "state_after": {"dummy": 5},
+    }
+    root = _make_root_with_child(42)
+
+    result = train_step(
+        rollout=rollout,
+        root=root,
+        committed_token_id=42,
+        meta_trajectory=meta_traj,
+        meta_mlp=meta,
+    )
+
+    assert isinstance(result["total_loss"], float), (
+        f"Legacy mode total_loss should be float, got {type(result['total_loss'])}"
+    )
+    assert result["total_loss"] != 0.0, (
+        f"Legacy mode should produce non-zero loss, got {result['total_loss']}"
+    )
+    assert result["batch_ready"] is False, (
+        f"Legacy mode should return batch_ready=False, got {result['batch_ready']}"
+    )
+
+
+def test_train_step_no_weight_update_before_batch():
+    """
+    Integration: With training_state and batch_size=4, calling train_step
+    3 times should NOT change meta_mlp weights (buffering defers update).
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=4, buffer_capacity=100)
+
+    # Record initial weights
+    initial_params = [p.clone().detach() for p in meta.parameters()]
+
+    rollout = {
+        "token_id": 42, "duration": 5,
+        "states": [{"dummy": i} for i in range(6)],
+        "rewards": [0.1, 0.2, 0.15, 0.1, 0.05],
+        "components": [{"speed_reward": 0.1} for _ in range(5)],
+        "state_before": {"dummy": 0}, "state_after": {"dummy": 5},
+    }
+
+    for _ in range(3):
+        meta_traj = [
+            {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+            {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+        ]
+        root = _make_root_with_child(42)
+        train_step(
+            rollout=rollout,
+            root=root,
+            committed_token_id=42,
+            meta_trajectory=meta_traj,
+            meta_mlp=meta,
+            training_state=ts,
+        )
+
+    # Verify weights have NOT changed (no update happened)
+    for i, (p_init, p_current) in enumerate(zip(initial_params, meta.parameters())):
+        assert torch.allclose(p_init, p_current.data), (
+            f"Parameter {i} should NOT change before batch update, "
+            f"max diff = {(p_init - p_current.data).abs().max().item()}"
+        )
+
+
+def test_full_batch_cycle():
+    """
+    Integration: Full end-to-end batch cycle.
+    1. Create TrainingState(batch_size=2)
+    2. Call train_step 2 times (batch_ready=True on 2nd)
+    3. Call get_batch() and update_metapolicy_batch()
+    4. Verify step_count is 1 and weights changed from initial values.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=2, buffer_capacity=100)
+
+    # Record initial weights
+    initial_params = [p.clone().detach() for p in meta.parameters()]
+
+    rollout = {
+        "token_id": 42, "duration": 5,
+        "states": [{"dummy": i} for i in range(6)],
+        "rewards": [0.1, 0.2, 0.15, 0.1, 0.05],
+        "components": [{"speed_reward": 0.1} for _ in range(5)],
+        "state_before": {"dummy": 0}, "state_after": {"dummy": 5},
+    }
+
+    results = []
+    for _ in range(2):
+        meta_traj = [
+            {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+            {"decision": 1, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+            {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        ]
+        root = _make_root_with_child(42)
+        result = train_step(
+            rollout=rollout,
+            root=root,
+            committed_token_id=42,
+            meta_trajectory=meta_traj,
+            meta_mlp=meta,
+            training_state=ts,
+        )
+        results.append(result)
+
+    assert results[1]["batch_ready"] is True, (
+        f"2nd call should trigger batch_ready, got {results[1]['batch_ready']}"
+    )
+
+    # Now run the batch update
+    batch = ts.get_batch()
+    update_result = ts.update_metapolicy_batch(meta, batch)
+
+    assert ts.step_count == 1, (
+        f"After one batch update, step_count should be 1, got {ts.step_count}"
+    )
+    assert isinstance(update_result["loss"], float), (
+        f"Batch update should return float loss, got {type(update_result['loss'])}"
+    )
+
+    # Verify weights CHANGED after batch update
+    any_changed = False
+    for p_init, p_current in zip(initial_params, meta.parameters()):
+        if not torch.allclose(p_init, p_current.data):
+            any_changed = True
+            break
+
+    assert any_changed, (
+        "After batch update, at least one parameter should have changed"
+    )
