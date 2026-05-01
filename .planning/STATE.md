@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 3 of 5 (Architecture Upgrades)
-Plan: 1 of 3 in current phase
-Status: Executing
-Last activity: 2026-05-01 — Completed 03-01 MetaMLP architecture upgrade
+Plan: 3 of 3 in current phase
+Status: Phase 3 Complete
+Last activity: 2026-05-01 — Completed 03-03 Architecture validation tests
 
-Progress: [████████░░] 47%
+Progress: [██████████░] 60%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7
-- Average duration: 209s
-- Total execution time: ~24 min
+- Total plans completed: 9
+- Average duration: 207s
+- Total execution time: ~31 min
 
 **By Phase:**
 
@@ -29,10 +29,10 @@ Progress: [████████░░] 47%
 |-------|-------|-------|----------|
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
-| 03 | 1 | 175s | 175s |
+| 03 | 3 | 579s | 193s |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (188s), 02-01 (285s), 02-02 (224s), 02-03 (226s), 03-01 (175s)
+- Last 5 plans: 02-02 (224s), 02-03 (226s), 03-01 (175s), 03-02 (301s), 03-03 (103s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -70,6 +70,9 @@ Recent decisions affecting current work:
 - 03-01: MetaMLP uses nn.Module subclass (not nn.Sequential) because skip connections require additive composition from two computation graph branches
 - 03-01: META_INPUT_DIM=237 hardcoded with breakdown comment rather than computed from imported constants (TOP_K/TOKEN_EMBED_DIM not module-level)
 - 03-01: hidden_dim parameter removed from metacontroller() since MetaMLP has fixed internal layer sizes
+- 03-02: Block 2 query_dim=64 from ctx1 output (not 192 from ego/scene/route concat)
+- 03-02: Residual connection only on block 2 (block 1 has dim mismatch: 192 query vs 64 output)
+- 03-02: Action planner uses hidden_dim*2=256 for first hidden layer, matching wider-then-narrow pattern
 
 ### Pending Todos
 
@@ -94,5 +97,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 03-01-PLAN.md
+Stopped at: Completed 03-03-PLAN.md (Phase 3 complete)
 Resume file: None
