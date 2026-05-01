@@ -12,9 +12,10 @@ import hmac
 import logging
 import os
 
-from fastapi import HTTPException, WebSocket, status
+from fastapi import WebSocket, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 _log = logging.getLogger("dashboard.auth")
 
@@ -50,7 +51,10 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
                 )
                 if not hmac.compare_digest(token, password):
                     _log.warning("Unauthorized request to %s", request.url.path)
-                    raise HTTPException(status_code=401, detail="Unauthorized")
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Unauthorized"},
+                    )
 
         return await call_next(request)
 
