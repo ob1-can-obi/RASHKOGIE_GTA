@@ -63,7 +63,12 @@ Plans:
   2. Encoder processes input through 2 stacked attention blocks, each followed by LayerNorm
   3. Action planner uses a 2-layer MLP — not a single hidden layer
   4. All modules serialize to disk and reload cleanly via torch.save/load with no shape mismatches
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — MetaMLP class with skip connection and LayerNorm, META_INPUT_DIM constant (ARCH-01, ARCH-04)
+- [ ] 03-02-PLAN.md — Encoder 2-block attention with LayerNorm, action planner 2-layer MLP (ARCH-02, ARCH-03)
+- [ ] 03-03-PLAN.md — Validation test suite for all architecture upgrades (ARCH-01, ARCH-02, ARCH-03, ARCH-04)
 
 ### Phase 4: Module Training Pipelines
 **Goal**: The complete encoder → intuition → reward → action planner → metacontroller training chain runs in strict order with convergence-triggered freezes
@@ -100,6 +105,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
-| 3. Architecture Upgrades | 0/TBD | Not started | - |
+| 3. Architecture Upgrades | 0/3 | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
