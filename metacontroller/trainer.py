@@ -25,6 +25,7 @@ from pathlib import Path
 
 import torch
 from collections import deque
+from datetime import datetime
 from torch.distributions import Categorical
 from torch.optim import Adam
 from torch.nn.utils import clip_grad_norm_
@@ -864,3 +865,190 @@ class TrainingState:
             "grad_norm": grad_norm.item(),
             "clipped": clipped,
         }
+
+    def save_checkpoint(self, checkpoint_dir, meta_mlp, reward_mlp, rf_predictor,
+                        intuition_mlp=None, token_embed=None, planner_mlp=None,
+                        session_id=None):
+        """
+        Save per-module checkpoint files (BATCH-05).
+
+        Each module gets its own .pt file. Trained modules (meta_mlp,
+        reward_mlp, rf_predictor) include both model_state_dict and
+        optimizer_state_dict. Untrained modules (intuition_mlp, token_embed,
+        planner_mlp) save state_dict only for model reconstruction.
+
+        Per BATCH-05: "one .pt per module per session" -- all 6 modules
+        get separate files.
+
+        Input:
+        - checkpoint_dir: str or Path, base checkpoint directory
+        - meta_mlp: the metacontroller MLP (required)
+        - reward_mlp: reward head MLP (required)
+        - rf_predictor: reward feature predictor MLP (required)
+        - intuition_mlp: intuition head MLP (optional, state_dict-only save)
+        - token_embed: token embedding table (optional, state_dict-only save)
+        - planner_mlp: action planner MLP (optional, state_dict-only save)
+        - session_id: str or None (auto-generated from timestamp if None)
+
+        Output:
+        - dict with "session_dir" path and "files_saved" list
+        """
+        if session_id is None:
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        session_dir = Path(checkpoint_dir) / f"session_{session_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        files_saved = []
+
+        # --- Trained modules: model + optimizer state ---
+
+        # Meta MLP checkpoint
+        meta_path = session_dir / "meta_mlp.pt"
+        torch.save({
+            "model_state_dict": meta_mlp.state_dict(),
+            "optimizer_state_dict": self.optimizer_meta.state_dict(),
+            "step_count": self.step_count,
+            "batch_size": self.batch_size,
+            "max_grad_norm": self.max_grad_norm,
+        }, meta_path)
+        files_saved.append(str(meta_path))
+
+        # Reward MLP checkpoint (separate file per BATCH-05)
+        reward_mlp_path = session_dir / "reward_mlp.pt"
+        torch.save({
+            "model_state_dict": reward_mlp.state_dict(),
+        }, reward_mlp_path)
+        files_saved.append(str(reward_mlp_path))
+
+        # RF Predictor checkpoint (separate file per BATCH-05)
+        rf_predictor_path = session_dir / "rf_predictor.pt"
+        torch.save({
+            "model_state_dict": rf_predictor.state_dict(),
+        }, rf_predictor_path)
+        files_saved.append(str(rf_predictor_path))
+
+        # Shared optimizer for reward_mlp + rf_predictor
+        optimizer_reward_path = session_dir / "optimizer_reward.pt"
+        torch.save({
+            "optimizer_state_dict": self.optimizer_reward.state_dict(),
+            "step_count": self.step_count,
+        }, optimizer_reward_path)
+        files_saved.append(str(optimizer_reward_path))
+
+        # --- Untrained modules: state_dict only (for model reconstruction) ---
+
+        if intuition_mlp is not None:
+            intuition_path = session_dir / "intuition_mlp.pt"
+            torch.save({
+                "model_state_dict": intuition_mlp.state_dict(),
+            }, intuition_path)
+            files_saved.append(str(intuition_path))
+
+        if token_embed is not None:
+            token_embed_path = session_dir / "token_embed.pt"
+            torch.save({
+                "model_state_dict": token_embed.state_dict(),
+            }, token_embed_path)
+            files_saved.append(str(token_embed_path))
+
+        if planner_mlp is not None:
+            planner_path = session_dir / "planner_mlp.pt"
+            torch.save({
+                "model_state_dict": planner_mlp.state_dict(),
+            }, planner_path)
+            files_saved.append(str(planner_path))
+
+        # Training state metadata
+        state_path = session_dir / "training_state.pt"
+        torch.save({
+            "step_count": self.step_count,
+            "batch_size": self.batch_size,
+            "max_grad_norm": self.max_grad_norm,
+            "buffer_size": len(self.buffer),
+            "trajectories_since_update": self.trajectories_since_update,
+        }, state_path)
+        files_saved.append(str(state_path))
+
+        return {"session_dir": str(session_dir), "files_saved": files_saved}
+
+    def load_checkpoint(self, session_dir, meta_mlp, reward_mlp, rf_predictor,
+                        intuition_mlp=None, token_embed=None, planner_mlp=None):
+        """
+        Load from a checkpoint directory (BATCH-06).
+
+        Restores model weights, optimizer state (momentum/variance),
+        and step count. Buffer is NOT restored (starts empty on resume
+        per RESEARCH.md Open Question 1 -- RESOLVED: No).
+
+        Uses map_location='cpu' for robustness (Pitfall 4).
+
+        Input:
+        - session_dir: str or Path, path to session_YYYYMMDD_HHMMSS directory
+        - meta_mlp: the metacontroller MLP (weights will be overwritten)
+        - reward_mlp: reward head MLP (weights will be overwritten)
+        - rf_predictor: reward feature predictor MLP (weights will be overwritten)
+        - intuition_mlp: intuition head MLP (optional, weights overwritten if file exists)
+        - token_embed: token embedding table (optional, weights overwritten if file exists)
+        - planner_mlp: action planner MLP (optional, weights overwritten if file exists)
+
+        Output:
+        - dict with "loaded" bool, "step_count" int, "files_loaded" list
+        """
+        session_dir = Path(session_dir)
+        files_loaded = []
+
+        # Load meta MLP (model + optimizer)
+        meta_path = session_dir / "meta_mlp.pt"
+        if meta_path.exists():
+            ckpt = torch.load(meta_path, map_location="cpu", weights_only=True)
+            meta_mlp.load_state_dict(ckpt["model_state_dict"])
+            self.optimizer_meta.load_state_dict(ckpt["optimizer_state_dict"])
+            self.step_count = ckpt["step_count"]
+            files_loaded.append(str(meta_path))
+
+        # Load reward MLP (model only)
+        reward_mlp_path = session_dir / "reward_mlp.pt"
+        if reward_mlp_path.exists():
+            ckpt = torch.load(reward_mlp_path, map_location="cpu", weights_only=True)
+            reward_mlp.load_state_dict(ckpt["model_state_dict"])
+            files_loaded.append(str(reward_mlp_path))
+
+        # Load RF Predictor (model only)
+        rf_predictor_path = session_dir / "rf_predictor.pt"
+        if rf_predictor_path.exists():
+            ckpt = torch.load(rf_predictor_path, map_location="cpu", weights_only=True)
+            rf_predictor.load_state_dict(ckpt["model_state_dict"])
+            files_loaded.append(str(rf_predictor_path))
+
+        # Load shared optimizer for reward_mlp + rf_predictor
+        optimizer_reward_path = session_dir / "optimizer_reward.pt"
+        if optimizer_reward_path.exists():
+            ckpt = torch.load(optimizer_reward_path, map_location="cpu", weights_only=True)
+            self.optimizer_reward.load_state_dict(ckpt["optimizer_state_dict"])
+            files_loaded.append(str(optimizer_reward_path))
+
+        # Load untrained modules (state_dict only)
+        if intuition_mlp is not None:
+            intuition_path = session_dir / "intuition_mlp.pt"
+            if intuition_path.exists():
+                ckpt = torch.load(intuition_path, map_location="cpu", weights_only=True)
+                intuition_mlp.load_state_dict(ckpt["model_state_dict"])
+                files_loaded.append(str(intuition_path))
+
+        if token_embed is not None:
+            token_embed_path = session_dir / "token_embed.pt"
+            if token_embed_path.exists():
+                ckpt = torch.load(token_embed_path, map_location="cpu", weights_only=True)
+                token_embed.load_state_dict(ckpt["model_state_dict"])
+                files_loaded.append(str(token_embed_path))
+
+        if planner_mlp is not None:
+            planner_path = session_dir / "planner_mlp.pt"
+            if planner_path.exists():
+                ckpt = torch.load(planner_path, map_location="cpu", weights_only=True)
+                planner_mlp.load_state_dict(ckpt["model_state_dict"])
+                files_loaded.append(str(planner_path))
+
+        loaded = len(files_loaded) > 0
+        return {"loaded": loaded, "step_count": self.step_count, "files_loaded": files_loaded}
