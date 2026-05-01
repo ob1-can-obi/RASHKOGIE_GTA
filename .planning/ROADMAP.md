@@ -84,7 +84,7 @@ Plans:
 **Plans:** 6 plans
 
 Plans:
-- [ ] 04-01-PLAN.md — Shared infrastructure: training_config.json, training_status.json, training_utils.py, training_data dirs, test scaffold (PIPE-01, PIPE-05, PIPE-06)
+- [x] 04-01-PLAN.md — Shared infrastructure: training_config.json, training_status.json, training_utils.py, training_data dirs, test scaffold (PIPE-01, PIPE-05, PIPE-06)
 - [ ] 04-02-PLAN.md — Encoder + intuition head joint training script (PIPE-02)
 - [ ] 04-03-PLAN.md — Reward head offline training script with freeze on convergence (PIPE-03)
 - [ ] 04-04-PLAN.md — Action planner imitation learning script (PIPE-04)
@@ -114,5 +114,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
-| 4. Module Training Pipelines | 0/6 | Not started | - |
+| 4. Module Training Pipelines | 1/6 | In progress | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
