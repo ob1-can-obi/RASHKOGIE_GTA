@@ -8,11 +8,11 @@
 ### Training Correctness
 
 - [x] **TRAIN-01**: Metacontroller uses categorical sampling from decision logits during training (argmax only at inference)
-- [ ] **TRAIN-02**: Entropy regularization added to metacontroller loss with annealing schedule (0.05 → 0.005)
-- [ ] **TRAIN-03**: Large negative reward when metacontroller fails to commit before current token ends
-- [ ] **TRAIN-04**: Penalty for lazy commits (immediate COMMIT_NEXT without meaningful search depth)
-- [ ] **TRAIN-05**: Advantage normalization across metalevel trajectory batches
-- [ ] **TRAIN-06**: Duration-normalized returns to correct BPE variable-length token bias
+- [x] **TRAIN-02**: Entropy regularization added to metacontroller loss with annealing schedule (0.05 → 0.005)
+- [x] **TRAIN-03**: Large negative reward when metacontroller fails to commit before current token ends
+- [x] **TRAIN-04**: Penalty for lazy commits (immediate COMMIT_NEXT without meaningful search depth)
+- [x] **TRAIN-05**: Advantage normalization across metalevel trajectory batches
+- [x] **TRAIN-06**: Duration-normalized returns to correct BPE variable-length token bias
 
 ### Batch Training Infrastructure
 
@@ -81,11 +81,11 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | TRAIN-01 | Phase 1 | Complete |
-| TRAIN-02 | Phase 1 | Pending |
-| TRAIN-03 | Phase 1 | Pending |
-| TRAIN-04 | Phase 1 | Pending |
-| TRAIN-05 | Phase 1 | Pending |
-| TRAIN-06 | Phase 1 | Pending |
+| TRAIN-02 | Phase 1 | Complete |
+| TRAIN-03 | Phase 1 | Complete |
+| TRAIN-04 | Phase 1 | Complete |
+| TRAIN-05 | Phase 1 | Complete |
+| TRAIN-06 | Phase 1 | Complete |
 | BATCH-01 | Phase 2 | Pending |
 | BATCH-02 | Phase 2 | Pending |
 | BATCH-03 | Phase 2 | Pending |

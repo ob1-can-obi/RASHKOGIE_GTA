@@ -12,7 +12,7 @@ This is a brownfield project — all module code exists. The remaining work is: 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Training Correctness** - Fix the three compounding bugs that corrupt every gradient update
+- [x] **Phase 1: Training Correctness** - Fix the three compounding bugs that corrupt every gradient update
 - [ ] **Phase 2: Batch Training and Checkpointing** - Add trajectory buffer, Adam optimizer, and per-module checkpoint system
 - [ ] **Phase 3: Architecture Upgrades** - Deepen MLPs, add encoder attention block, and add LayerNorm throughout
 - [ ] **Phase 4: Module Training Pipelines** - Implement the strict staged training chain with convergence-triggered freezes
@@ -34,8 +34,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 01-01-PLAN.md — Categorical sampling with training mode flag (TRAIN-01)
-- [ ] 01-02-PLAN.md — Duration normalization, not-ready penalty, lazy-commit penalty (TRAIN-03, TRAIN-04, TRAIN-06)
-- [ ] 01-03-PLAN.md — Entropy regularization and advantage normalization (TRAIN-02, TRAIN-05)
+- [x] 01-02-PLAN.md — Duration normalization, not-ready penalty, lazy-commit penalty (TRAIN-03, TRAIN-04, TRAIN-06)
+- [x] 01-03-PLAN.md — Entropy regularization and advantage normalization (TRAIN-02, TRAIN-05)
 
 ### Phase 2: Batch Training and Checkpointing
 **Goal**: Training sessions accumulate trajectory batches, survive interruption, and resume without cold-starting the optimizer
@@ -93,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Training Correctness | 1/3 | In Progress | - |
+| 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 0/TBD | Not started | - |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
