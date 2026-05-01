@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 2 of 5 (Batch Training and Checkpointing)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: Executing
-Last activity: 2026-05-01 — Plan 02-01 complete (TrainingState class + tests)
+Last activity: 2026-05-01 — Plan 02-02 complete (Checkpoint save/load + tests)
 
-Progress: [█████░░░░░] 27%
+Progress: [██████░░░░] 33%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 210s
-- Total execution time: ~14 min
+- Total plans completed: 5
+- Average duration: 213s
+- Total execution time: ~18 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 3 | 556s | 185s |
-| 02 | 1 | 285s | 285s |
+| 02 | 2 | 509s | 255s |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (165s), 01-02 (203s), 01-03 (188s), 02-01 (285s)
+- Last 5 plans: 01-01 (165s), 01-02 (203s), 01-03 (188s), 02-01 (285s), 02-02 (224s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -56,6 +56,9 @@ Recent decisions affecting current work:
 - 02-01: Cross-batch advantage normalization pools all steps from all trajectories before normalizing
 - 02-01: reward_mlp and rf_predictor share a single Adam optimizer matching existing manual SGD grouping
 - 02-01: Batch-mean divides by total_steps (metapolicy) or batch count (reward) for consistent gradient scale
+- 02-02: reward_mlp and rf_predictor get SEPARATE .pt files; shared optimizer saves as optimizer_reward.pt
+- 02-02: Buffer NOT restored on load -- starts empty on resume per RESEARCH.md resolved decision
+- 02-02: All torch.load calls use weights_only=True and map_location='cpu' (Pitfall 4 and 6)
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
@@ -83,5 +86,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 02-01-PLAN.md
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
