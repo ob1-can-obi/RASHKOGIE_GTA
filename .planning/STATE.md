@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 1 of 5 (Training Correctness)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-04-30 — Roadmap created, phases defined
+Plan: 1 of 3 in current phase
+Status: Executing
+Last activity: 2026-05-01 — Completed 01-01 (Categorical Sampling Fix)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 7%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 165s
+- Total execution time: ~3 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01 | 1 | 165s | 165s |
 
 **Recent Trend:**
-- Last 5 plans: -
-- Trend: -
+- Last 5 plans: 01-01 (165s)
+- Trend: N/A (first plan)
 
 *Updated after each plan completion*
 
@@ -42,6 +42,8 @@ Progress: [░░░░░░░░░░] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
+- 01-01: training=False default preserves backward compatibility -- no caller changes needed
+- 01-01: Categorical(logits=) used instead of softmax+Categorical(probs=) for numerical stability
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
@@ -68,6 +70,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-30
-Stopped at: Roadmap created — ready to plan Phase 1
-Resume file: None
+Last session: 2026-05-01
+Stopped at: Completed 01-01-PLAN.md (Categorical Sampling Fix)
+Resume file: .planning/phases/01-training-correctness/01-01-SUMMARY.md

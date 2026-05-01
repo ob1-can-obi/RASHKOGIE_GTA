@@ -1,0 +1,122 @@
+# Requirements: RASHKOGIE GTA
+
+**Defined:** 2026-04-30
+**Core Value:** The metacontroller must learn to search intelligently — using the tree to find better actions than the planner's top-1, while staying ready before the current token ends.
+
+## v1 Requirements
+
+### Training Correctness
+
+- [x] **TRAIN-01**: Metacontroller uses categorical sampling from decision logits during training (argmax only at inference)
+- [ ] **TRAIN-02**: Entropy regularization added to metacontroller loss with annealing schedule (0.05 → 0.005)
+- [ ] **TRAIN-03**: Large negative reward when metacontroller fails to commit before current token ends
+- [ ] **TRAIN-04**: Penalty for lazy commits (immediate COMMIT_NEXT without meaningful search depth)
+- [ ] **TRAIN-05**: Advantage normalization across metalevel trajectory batches
+- [ ] **TRAIN-06**: Duration-normalized returns to correct BPE variable-length token bias
+
+### Batch Training Infrastructure
+
+- [ ] **BATCH-01**: Trajectory replay buffer (deque, ~10K capacity) collecting full metalevel trajectories
+- [ ] **BATCH-02**: Batch updates every N=8 trajectories instead of single-sample online updates
+- [ ] **BATCH-03**: Adam optimizer (lr=3e-4, eps=1e-5) replacing manual SGD for all modules
+- [ ] **BATCH-04**: Gradient clipping (max_norm=0.5) on all policy gradient updates
+- [ ] **BATCH-05**: Per-module checkpoint saving (one .pt per module per session)
+- [ ] **BATCH-06**: Checkpoint loading and resume for interrupted training sessions
+
+### Architecture Upgrades
+
+- [ ] **ARCH-01**: Metacontroller MLP upgraded to 3 layers (256-256-128-4) with skip connection and LayerNorm
+- [ ] **ARCH-02**: Encoder attention upgraded to 2 blocks with LayerNorm (keep 4 heads, head_dim=16)
+- [ ] **ARCH-03**: Action planner upgraded to 2-layer MLP
+- [ ] **ARCH-04**: Input dimension pinned as a constant (not recomputed dynamically on every call)
+
+### Module Training Pipelines
+
+- [ ] **PIPE-01**: Central training_data folder structure for all modules
+- [ ] **PIPE-02**: Intuition head standalone training loop (automated during gameplay, MSE on z_next vs real z_{t+1})
+- [ ] **PIPE-03**: Reward head standalone training loop (automated during gameplay, MSE on r_edge vs realized return)
+- [ ] **PIPE-04**: Action planner training loop (imitation learning from player driving captures)
+- [ ] **PIPE-05**: Module freeze mechanism — freeze intuition head + reward head when converged, block gradients
+- [ ] **PIPE-06**: Convergence detection with configurable thresholds per module
+- [ ] **PIPE-07**: Full end-to-end training chain: encoder → intuition → reward → freeze → action planner → metacontroller RL
+
+### Training Dashboard
+
+- [ ] **DASH-01**: FastAPI web server serving training dashboard on localhost
+- [ ] **DASH-02**: Live loss curves and reward curves (SSE streaming + Chart.js)
+- [ ] **DASH-03**: Decision distribution histogram (EXPLORE/ROLLBACK/INTERRUPT/COMMIT_NEXT ratios over time)
+- [ ] **DASH-04**: Hyperparameter control panel (tune lr, entropy coeff, think_cost, batch size from browser)
+- [ ] **DASH-05**: Training session history with per-session metrics summary
+- [ ] **DASH-06**: Session comparison view (overlay loss curves from different runs)
+- [ ] **DASH-07**: Episode return tracking (primary health metric, not loss)
+- [ ] **DASH-08**: Nodes expanded per token and search depth distribution
+
+## v2 Requirements
+
+### Advanced Research Metrics
+
+- **VOC-01**: Value of Cognition estimation per search step (meaningful only after stable metacontroller)
+- **VOC-02**: Search efficiency metric (quality improvement per node expanded)
+- **VOC-03**: Counterfactual analysis (would planner top-1 have been better than searched result?)
+
+### Advanced Training
+
+- **ADV-01**: Actor-critic value head for metacontroller (reduces REINFORCE variance)
+- **ADV-02**: Curriculum learning (easy routes → hard routes)
+- **ADV-03**: Multi-route evaluation benchmark
+
+## Out of Scope
+
+| Feature | Reason |
+|---------|--------|
+| TensorBoard / W&B integration | Custom dashboard chosen for full control over hyperparameter UI |
+| Prioritized experience replay | Overkill for trajectory-level buffer; adds complexity without clear benefit |
+| Cloud training | Same Windows PC runs GTA + training |
+| Image/pixel perception | State comes from SHVDN game data, not screenshots |
+| Multi-agent scenarios | Single vehicle research project |
+| Pretrained model integration | All modules trained from scratch on GTA data |
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| TRAIN-01 | Phase 1 | Complete |
+| TRAIN-02 | Phase 1 | Pending |
+| TRAIN-03 | Phase 1 | Pending |
+| TRAIN-04 | Phase 1 | Pending |
+| TRAIN-05 | Phase 1 | Pending |
+| TRAIN-06 | Phase 1 | Pending |
+| BATCH-01 | Phase 2 | Pending |
+| BATCH-02 | Phase 2 | Pending |
+| BATCH-03 | Phase 2 | Pending |
+| BATCH-04 | Phase 2 | Pending |
+| BATCH-05 | Phase 2 | Pending |
+| BATCH-06 | Phase 2 | Pending |
+| ARCH-01 | Phase 3 | Pending |
+| ARCH-02 | Phase 3 | Pending |
+| ARCH-03 | Phase 3 | Pending |
+| ARCH-04 | Phase 3 | Pending |
+| PIPE-01 | Phase 4 | Pending |
+| PIPE-02 | Phase 4 | Pending |
+| PIPE-03 | Phase 4 | Pending |
+| PIPE-04 | Phase 4 | Pending |
+| PIPE-05 | Phase 4 | Pending |
+| PIPE-06 | Phase 4 | Pending |
+| PIPE-07 | Phase 4 | Pending |
+| DASH-01 | Phase 5 | Pending |
+| DASH-02 | Phase 5 | Pending |
+| DASH-03 | Phase 5 | Pending |
+| DASH-04 | Phase 5 | Pending |
+| DASH-05 | Phase 5 | Pending |
+| DASH-06 | Phase 5 | Pending |
+| DASH-07 | Phase 5 | Pending |
+| DASH-08 | Phase 5 | Pending |
+
+**Coverage:**
+- v1 requirements: 31 total
+- Mapped to phases: 31
+- Unmapped: 0 ✓
+
+---
+*Requirements defined: 2026-04-30*
+*Last updated: 2026-04-30 after initial definition*

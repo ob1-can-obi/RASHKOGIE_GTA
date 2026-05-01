@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 3 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Categorical sampling with training mode flag (TRAIN-01)
+- [x] 01-01-PLAN.md — Categorical sampling with training mode flag (TRAIN-01)
 - [ ] 01-02-PLAN.md — Duration normalization, not-ready penalty, lazy-commit penalty (TRAIN-03, TRAIN-04, TRAIN-06)
 - [ ] 01-03-PLAN.md — Entropy regularization and advantage normalization (TRAIN-02, TRAIN-05)
 
@@ -93,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Training Correctness | 0/3 | Planned | - |
+| 1. Training Correctness | 1/3 | In Progress | - |
 | 2. Batch Training and Checkpointing | 0/TBD | Not started | - |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
