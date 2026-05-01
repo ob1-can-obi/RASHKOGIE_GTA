@@ -30,7 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A token that expires without a commit produces a large negative reward in the trainer log
   4. A COMMIT_NEXT with zero nodes expanded produces a distinct negative penalty in the trainer log
   5. Advantage values across a batch are zero-mean and unit-variance before the policy gradient step
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Categorical sampling with training mode flag (TRAIN-01)
+- [ ] 01-02-PLAN.md — Duration normalization, not-ready penalty, lazy-commit penalty (TRAIN-03, TRAIN-04, TRAIN-06)
+- [ ] 01-03-PLAN.md — Entropy regularization and advantage normalization (TRAIN-02, TRAIN-05)
 
 ### Phase 2: Batch Training and Checkpointing
 **Goal**: Training sessions accumulate trajectory batches, survive interruption, and resume without cold-starting the optimizer
@@ -88,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Training Correctness | 0/TBD | Not started | - |
+| 1. Training Correctness | 0/3 | Planned | - |
 | 2. Batch Training and Checkpointing | 0/TBD | Not started | - |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
