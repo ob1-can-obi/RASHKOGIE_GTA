@@ -25,10 +25,10 @@
 
 ### Architecture Upgrades
 
-- [ ] **ARCH-01**: Metacontroller MLP upgraded to 3 layers (256-256-128-4) with skip connection and LayerNorm
-- [ ] **ARCH-02**: Encoder attention upgraded to 2 blocks with LayerNorm (keep 4 heads, head_dim=16)
-- [ ] **ARCH-03**: Action planner upgraded to 2-layer MLP
-- [ ] **ARCH-04**: Input dimension pinned as a constant (not recomputed dynamically on every call)
+- [x] **ARCH-01**: Metacontroller MLP upgraded to 3 layers (256-256-128-4) with skip connection and LayerNorm
+- [x] **ARCH-02**: Encoder attention upgraded to 2 blocks with LayerNorm (keep 4 heads, head_dim=16)
+- [x] **ARCH-03**: Action planner upgraded to 2-layer MLP
+- [x] **ARCH-04**: Input dimension pinned as a constant (not recomputed dynamically on every call)
 
 ### Module Training Pipelines
 
@@ -92,10 +92,10 @@
 | BATCH-04 | Phase 2 | Complete |
 | BATCH-05 | Phase 2 | Complete |
 | BATCH-06 | Phase 2 | Complete |
-| ARCH-01 | Phase 3 | Pending |
-| ARCH-02 | Phase 3 | Pending |
-| ARCH-03 | Phase 3 | Pending |
-| ARCH-04 | Phase 3 | Pending |
+| ARCH-01 | Phase 3 | Complete |
+| ARCH-02 | Phase 3 | Complete |
+| ARCH-03 | Phase 3 | Complete |
+| ARCH-04 | Phase 3 | Complete |
 | PIPE-01 | Phase 4 | Pending |
 | PIPE-02 | Phase 4 | Pending |
 | PIPE-03 | Phase 4 | Pending |

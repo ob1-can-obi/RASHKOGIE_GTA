@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 3 of 5 (Architecture Upgrades)
-Plan: 0 of 3 in current phase
-Status: Ready to execute
-Last activity: 2026-04-30 — Phase 3 planned (3 plans, 2 waves)
+Plan: 2 of 3 in current phase
+Status: Executing
+Last activity: 2026-05-01 — Completed 03-02 Encoder 2-block attention + action planner 2-layer MLP
 
-Progress: [████████░░] 40%
+Progress: [█████████░] 53%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Average duration: 215s
-- Total execution time: ~22 min
+- Total plans completed: 8
+- Average duration: 220s
+- Total execution time: ~29 min
 
 **By Phase:**
 
@@ -29,9 +29,10 @@ Progress: [████████░░] 40%
 |-------|-------|-------|----------|
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
+| 03 | 2 | 476s | 238s |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (203s), 01-03 (188s), 02-01 (285s), 02-02 (224s), 02-03 (226s)
+- Last 5 plans: 02-01 (285s), 02-02 (224s), 02-03 (226s), 03-01 (175s), 03-02 (301s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -66,6 +67,12 @@ Recent decisions affecting current work:
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
+- 03-01: MetaMLP uses nn.Module subclass (not nn.Sequential) because skip connections require additive composition from two computation graph branches
+- 03-01: META_INPUT_DIM=237 hardcoded with breakdown comment rather than computed from imported constants (TOP_K/TOKEN_EMBED_DIM not module-level)
+- 03-01: hidden_dim parameter removed from metacontroller() since MetaMLP has fixed internal layer sizes
+- 03-02: Block 2 query_dim=64 from ctx1 output (not 192 from ego/scene/route concat)
+- 03-02: Residual connection only on block 2 (block 1 has dim mismatch: 192 query vs 64 output)
+- 03-02: Action planner uses hidden_dim*2=256 for first hidden layer, matching wider-then-narrow pattern
 
 ### Pending Todos
 
@@ -90,5 +97,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 02-03-PLAN.md (Phase 2 complete)
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
