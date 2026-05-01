@@ -33,7 +33,7 @@
 ### Module Training Pipelines
 
 - [x] **PIPE-01**: Central training_data folder structure for all modules
-- [ ] **PIPE-02**: Intuition head standalone training loop (automated during gameplay, MSE on z_next vs real z_{t+1})
+- [x] **PIPE-02**: Intuition head standalone training loop (automated during gameplay, MSE on z_next vs real z_{t+1})
 - [ ] **PIPE-03**: Reward head standalone training loop (automated during gameplay, MSE on r_edge vs realized return)
 - [ ] **PIPE-04**: Action planner training loop (imitation learning from player driving captures)
 - [x] **PIPE-05**: Module freeze mechanism — freeze intuition head + reward head when converged, block gradients
@@ -97,7 +97,7 @@
 | ARCH-03 | Phase 3 | Complete |
 | ARCH-04 | Phase 3 | Complete |
 | PIPE-01 | Phase 4 | Complete |
-| PIPE-02 | Phase 4 | Pending |
+| PIPE-02 | Phase 4 | Complete |
 | PIPE-03 | Phase 4 | Pending |
 | PIPE-04 | Phase 4 | Pending |
 | PIPE-05 | Phase 4 | Complete |

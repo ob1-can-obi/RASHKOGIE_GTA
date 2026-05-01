@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In progress
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-05-01T08:14:41Z"
-last_activity: 2026-05-01 — Phase 4 Plan 01 complete (shared training infrastructure)
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-05-01T08:22:41Z"
+last_activity: 2026-05-01 — Phase 4 Plan 02 complete (encoder+intuition joint training)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 15
-  completed_plans: 10
-  percent: 67
+  completed_plans: 11
+  percent: 73
 ---
 
 # Project State
@@ -26,19 +26,19 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 4 of 5 (Module Training Pipelines)
-Plan: 1 of 6 in current phase
+Plan: 2 of 6 in current phase
 Status: In progress
-Last activity: 2026-05-01 — Phase 4 Plan 01 complete (shared training infrastructure)
+Last activity: 2026-05-01 — Phase 4 Plan 02 complete (encoder+intuition joint training)
 
-Progress: [████████████░] 67%
+Progress: [█████████████░░] 73%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 10
-- Average duration: 209s
-- Total execution time: ~35 min
+- Total plans completed: 11
+- Average duration: 212s
+- Total execution time: ~39 min
 
 **By Phase:**
 
@@ -47,11 +47,11 @@ Progress: [████████████░] 67%
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
 | 03 | 3 | 579s | 193s |
-| 04 | 1 | 227s | 227s |
+| 04 | 2 | 469s | 235s |
 
 **Recent Trend:**
 
-- Last 5 plans: 02-03 (226s), 03-01 (175s), 03-02 (301s), 03-03 (103s), 04-01 (227s)
+- Last 5 plans: 03-01 (175s), 03-02 (301s), 03-03 (103s), 04-01 (227s), 04-02 (242s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -96,6 +96,9 @@ Recent decisions affecting current work:
 - 04-01: freeze_module uses hasattr(value, 'parameters') to skip int/float in encoder weight dicts
 - 04-01: update_training_status falls back to initial template if JSON is malformed (T-04-16)
 - 04-01: load_training_config wraps JSONDecodeError with descriptive message (T-04-01)
+- 04-02: importlib used in tests for train.py import since main_model/ is not a Python package
+- 04-02: Batch-mean loss divides by len(batch) for consistent gradient scale
+- 04-02: Max epochs reached without convergence still saves checkpoint and updates status
 
 ### Pending Todos
 
@@ -120,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:14:41Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-05-01T08:22:41Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
