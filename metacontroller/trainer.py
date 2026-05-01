@@ -19,12 +19,31 @@ Conceptual split:
     trainer   = "learn from what happened"
 """
 
+import sys
+import math
+from pathlib import Path
+
 import torch
+
+REWARD_HEAD_DIR = Path(__file__).resolve().parent.parent / "reward_head"
+if str(REWARD_HEAD_DIR) not in sys.path:
+    sys.path.insert(0, str(REWARD_HEAD_DIR))
+
+from reward_head import reward_head, extract_reward_features, predict_reward_features
 
 
 # =========================================================================
 # 1. Compute realized token return
 # =========================================================================
+
+# Penalty constants (Claude's discretion per CONTEXT.md)
+# C: not-ready penalty multiplier. Penalty = -C * token_duration_frames
+# K: lazy-commit penalty multiplier. Penalty = -K * token_duration_frames * scaling
+# MIN_SEARCH_NODES: threshold below which a commit is considered "lazy"
+NOT_READY_C = 0.1
+LAZY_K = 0.05
+MIN_SEARCH_NODES = 2
+
 
 def compute_token_return(rollout, gamma=0.99, bootstrap_value=None):
     """
@@ -55,6 +74,15 @@ def compute_token_return(rollout, gamma=0.99, bootstrap_value=None):
     if bootstrap_value is not None:
         token_return += (gamma ** k) * bootstrap_value
 
+    # -----------------------------------------------------------------
+    # duration normalization (TRAIN-06, per D-08/D-09)
+    # sqrt preserves short-burst surprise signals while dampening
+    # variable-length BPE bias
+    # -----------------------------------------------------------------
+
+    if k > 0:
+        token_return = token_return / math.sqrt(k)
+
     return token_return
 
 
@@ -76,7 +104,7 @@ def backup_tree(root, committed_token_id, realized_return):
     - realized_return: float, the discounted return from the rollout
     """
     for child in root.children:
-        if child.token_id == committed_token_id:
+        if int(child.token_id) == int(committed_token_id):
             child.n += 1
             child.w += realized_return
             child.q = child.w / child.n
@@ -97,6 +125,9 @@ def compute_metalevel_advantages(
     realized_return,
     think_cost=0.01,
     gamma=0.99,
+    is_fallback=False,
+    nodes_expanded=0,
+    token_duration_frames=1,
 ):
     """
     Assign credit to every search decision the metacontroller made,
@@ -121,6 +152,9 @@ def compute_metalevel_advantages(
     - realized_return: float, the discounted return from the token rollout
     - think_cost: float, penalty per search step (cost of deliberation)
     - gamma: discount factor for metalevel returns
+    - is_fallback: bool, True if metacontroller failed to commit (D-04)
+    - nodes_expanded: int, how many nodes were expanded during search
+    - token_duration_frames: int, duration of the token in frames
 
     Output:
     - advantages: list of floats, one per trajectory step
@@ -142,6 +176,26 @@ def compute_metalevel_advantages(
         else:
             # search steps: pay the think cost
             meta_rewards.append(-think_cost)
+
+    # -----------------------------------------------------------------
+    # inject penalty signals (TRAIN-03, TRAIN-04)
+    # penalties are already duration-scaled per D-02/D-06/D-07
+    # applied AFTER duration normalization of token_return (Pitfall 5)
+    # -----------------------------------------------------------------
+
+    if is_fallback and n > 0:
+        # TRAIN-03 / D-01 / D-02: not-ready penalty replaces final reward
+        # (the commit was not the agent's decision, no credit)
+        not_ready_penalty = -NOT_READY_C * token_duration_frames
+        meta_rewards[-1] = not_ready_penalty
+
+    elif n > 0 and nodes_expanded < MIN_SEARCH_NODES:
+        # TRAIN-04 / D-05 / D-06: lazy-commit penalty added to final reward
+        # scaling: max(0, 1 - nodes_expanded/threshold) so 0 nodes = full penalty
+        # short tokens get near-zero penalty because token_duration_frames is small
+        scaling = max(0.0, 1.0 - nodes_expanded / MIN_SEARCH_NODES)
+        lazy_penalty = -LAZY_K * token_duration_frames * scaling
+        meta_rewards[-1] += lazy_penalty
 
     # -----------------------------------------------------------------
     # compute discounted returns backward
@@ -187,17 +241,22 @@ def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3):
     - total_loss: float, sum of per-step losses (for logging)
     """
 
-    total_loss = torch.tensor(0.0, requires_grad=True)
+    step_losses = []
 
     for step, advantage in zip(meta_trajectory, advantages):
-        logits = step["decision_logits"]       # [1, 4]
-        decision = step["decision"]             # int
+        features = step["features"]    # [1, fused_dim + 6] — rerun to get live graph
+        decision = step["decision"]    # int
 
-        log_probs = torch.log_softmax(logits, dim=-1)
+        logits         = meta_mlp(features)                     # [1, 4]
+        log_probs      = torch.log_softmax(logits, dim=-1)
         log_prob_taken = log_probs[0, decision]
 
-        step_loss = -(log_prob_taken * advantage)
-        total_loss = total_loss + step_loss
+        step_losses.append(-(log_prob_taken * advantage))
+
+    if not step_losses:
+        return 0.0
+
+    total_loss = torch.stack(step_losses).sum()
 
     # -----------------------------------------------------------------
     # backward + manual SGD step
@@ -231,6 +290,10 @@ def train_step(
     think_cost=0.01,
     lr=1e-3,
     bootstrap_value=None,
+    is_fallback=False,
+    nodes_expanded=0,
+    token_duration_frames=1,
+    entropy_coeff=0.05,
 ):
     """
     Full learning cycle after one token execution.
@@ -273,6 +336,9 @@ def train_step(
         realized_return=token_return,
         think_cost=think_cost,
         gamma=gamma,
+        is_fallback=is_fallback,
+        nodes_expanded=nodes_expanded,
+        token_duration_frames=token_duration_frames,
     )
 
     # step 4: weight update
@@ -281,9 +347,144 @@ def train_step(
     )
 
     return {
-        "token_return": token_return,
-        "advantages": advantages,
-        "meta_returns": meta_returns,
-        "total_loss": total_loss,
+        "token_return":   token_return,
+        "advantages":     advantages,
+        "meta_returns":   meta_returns,
+        "total_loss":     total_loss,
         "n_search_steps": len(meta_trajectory),
+        "is_fallback":    is_fallback,
+    }
+
+
+# =========================================================================
+# 6. Train reward head
+# =========================================================================
+
+def train_reward_head(
+    rollout,
+    token_return,
+    encode_fn,
+    reward_mlp,
+    rf_predictor,
+    hidden_dim=128,
+    lr=1e-3,
+):
+    """
+    Train the reward head NN against the realized token return.
+
+    The reward head predicts r_edge from embeddings alone.  Here we give it
+    the real outcome so it learns to score transitions accurately.
+
+    Training target: token_return (discounted sum of real per-frame rewards)
+
+    Input:
+    - rollout:       dict from get_rollout — needs state_before, state_after, duration
+    - token_return:  float, realized discounted return from compute_token_return
+    - encode_fn:     callable(gta_state) -> z_t  [1, fused_dim]
+    - reward_mlp:    reward head MLP to update
+    - rf_predictor:  reward feature predictor MLP to update
+    - fused_dim, hidden_dim, lr: network and training params
+
+    Output dict:
+    - reward_loss:   float, MSE loss
+    - reward_mlp:    updated MLP
+    - rf_predictor:  updated MLP
+    """
+
+    state_before = rollout["state_before"]
+    state_after  = rollout["state_after"]
+    duration     = rollout["duration"]
+
+    # -------------------------------------------------------------------------
+    # Step 1: encode real states into embeddings
+    # -------------------------------------------------------------------------
+
+    z_parent = encode_fn(state_before).detach()  # [1, fused_dim]
+    z_child  = encode_fn(state_after).detach()  # [1, fused_dim]
+
+    fused_dim = z_parent.shape[-1]
+
+    # -------------------------------------------------------------------------
+    # Step 2: extract real reward features from both states
+    # -------------------------------------------------------------------------
+
+    rf_parent = extract_reward_features(state_before)   # [1, RF_DIM]
+    rf_child  = extract_reward_features(state_after)    # [1, RF_DIM]  (real, not predicted)
+
+    # -------------------------------------------------------------------------
+    # Step 3: build duration and time_left tensors
+    # token is already done so time_left = 0
+    # -------------------------------------------------------------------------
+
+    duration_t  = torch.tensor([[float(duration)]], dtype=torch.float32)
+    time_left_t = torch.tensor([[0.0]],             dtype=torch.float32)
+
+    # -------------------------------------------------------------------------
+    # Step 4: forward pass through reward head with real rf_child
+    # (bypasses rf_predictor — we have the real values here)
+    # -------------------------------------------------------------------------
+
+    r_pred, reward_mlp = reward_head(
+        z_parent   = z_parent,
+        z_child    = z_child,
+        rf_parent  = rf_parent,
+        rf_child   = rf_child,
+        duration   = duration_t,
+        time_left  = time_left_t,
+        reward_mlp = reward_mlp,
+        fused_dim  = fused_dim,
+        hidden_dim = hidden_dim,
+    )
+
+    # -------------------------------------------------------------------------
+    # Step 5: also train rf_predictor — it should have predicted rf_child
+    # from z_parent, delta_z, rf_parent
+    # -------------------------------------------------------------------------
+
+    delta_z = z_child - z_parent
+
+    rf_pred, rf_predictor = predict_reward_features(
+        z_parent     = z_parent,
+        delta_z      = delta_z,
+        rf_parent    = rf_parent,
+        rf_predictor = rf_predictor,
+        fused_dim    = fused_dim,
+        hidden_dim   = hidden_dim // 2,
+    )
+
+    # -------------------------------------------------------------------------
+    # Step 6: compute losses
+    # reward_mlp loss: predicted r_edge vs realized token_return
+    # rf_predictor loss: predicted rf vs real rf_child
+    # -------------------------------------------------------------------------
+
+    target_return = torch.tensor([[token_return]], dtype=torch.float32)
+    reward_loss   = (r_pred - target_return) ** 2
+
+    rf_loss = ((rf_pred - rf_child.detach()) ** 2).mean()
+
+    total_loss = reward_loss + rf_loss
+
+    # -------------------------------------------------------------------------
+    # Step 7: backward + manual SGD on both MLPs
+    # -------------------------------------------------------------------------
+
+    all_params = list(reward_mlp.parameters()) + list(rf_predictor.parameters())
+
+    for p in all_params:
+        if p.grad is not None:
+            p.grad.zero_()
+
+    total_loss.backward()
+
+    with torch.no_grad():
+        for p in all_params:
+            if p.grad is not None:
+                p.data -= lr * p.grad
+
+    return {
+        "reward_loss": reward_loss.item(),
+        "rf_loss":     rf_loss.item(),
+        "reward_mlp":  reward_mlp,
+        "rf_predictor": rf_predictor,
     }

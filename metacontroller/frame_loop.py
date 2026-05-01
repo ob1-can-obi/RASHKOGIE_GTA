@@ -35,7 +35,7 @@ if str(MAIN_MODEL_DIR) not in sys.path:
 from executor import execution_init, execution_frame, get_rollout
 from search_tree import search_init, search_step
 from time_context import time_context
-from trainer import train_step
+from trainer import train_step, train_reward_head
 
 
 def run_frame(
@@ -122,9 +122,10 @@ def drive_token(
     fallback_token_id,
     z_t,
     z_running,
+    rf_current,
     vocab_size,
-    reward_fn,
     unmerge_fn,
+    duration_fn,
     encode_fn,
     send_controls_fn,
     read_state_fn,
@@ -133,9 +134,13 @@ def drive_token(
     max_search_budget,
     token_embed=None,
     intuition_mlp=None,
+    reward_mlp=None,
+    rf_predictor=None,
+    planner_mlp=None,
     meta_mlp=None,
     embed_dim=32,
     hidden_dim=128,
+    top_k=3,
     **reward_kwargs,
 ):
     """
@@ -153,15 +158,20 @@ def drive_token(
     - fallback_token_id: planner's top-1, used if search doesn't finish
     - z_t: current fused embedding, shape [1, fused_dim]
     - z_running: state prediction when this token was committed, shape [1, fused_dim]
-    - vocab_size, reward_fn, unmerge_fn: search tree params
+    - rf_current: reward features at the current real GTA state, shape [1, RF_DIM]
+    - vocab_size: token vocabulary size
+    - unmerge_fn: callable(int) -> list[int]
+    - duration_fn: callable(int) -> int  (token_id -> duration in frames)
     - encode_fn: callable(state) -> z_t, encodes a GTA state into embedding
     - send_controls_fn, read_state_fn: GTA bridge
     - start_frame: frame number when this token starts
     - deadline_frame: frame by which next token must be ready
     - max_search_budget: max nodes to expand
-    - token_embed, intuition_mlp, meta_mlp: shared weights
+    - token_embed, intuition_mlp, reward_mlp, rf_predictor,
+      planner_mlp, meta_mlp: shared weights
     - embed_dim, hidden_dim: network dimensions
-    - reward_kwargs: forwarded to env_reward_fn
+    - top_k: candidates per node in the search tree
+    - reward_kwargs: forwarded to compute_reward (weights, thresholds, etc.)
 
     Output dict:
     - rollout: dict from get_rollout (per-frame rewards, states)
@@ -174,7 +184,7 @@ def drive_token(
     # init executor (start playing current token)
     # -----------------------------------------------------------------
 
-    exec_state = execution_init(token_id, token_table, read_state_fn)
+    exec_state = execution_init(token_id, token_table, unmerge_fn, read_state_fn)
     token_duration = exec_state.duration
 
     # -----------------------------------------------------------------
@@ -185,18 +195,23 @@ def drive_token(
 
     search_state = search_init(
         z_t=z_t,
+        rf_current=rf_current,
         planner_candidate_ids=planner_candidate_ids,
         planner_candidate_priors=planner_candidate_priors,
         running_token_id=running_token_id,
         z_running=z_running,
         vocab_size=vocab_size,
-        reward_fn=reward_fn,
         unmerge_fn=unmerge_fn,
+        duration_fn=duration_fn,
         token_embed=token_embed,
         intuition_mlp=intuition_mlp,
+        reward_mlp=reward_mlp,
+        rf_predictor=rf_predictor,
+        planner_mlp=planner_mlp,
         meta_mlp=meta_mlp,
         embed_dim=embed_dim,
         hidden_dim=hidden_dim,
+        top_k=top_k,
     )
 
     # -----------------------------------------------------------------
@@ -233,20 +248,58 @@ def drive_token(
             break
 
     # -----------------------------------------------------------------
-    # decide next token
+    # decide next token (D-03: fallback to planner top-1 if no commit)
     # -----------------------------------------------------------------
 
+    is_fallback = False
     if search_state.chosen_token_id is not None:
         next_token_id = search_state.chosen_token_id
     else:
-        # search didn't finish — fall back to planner's top-1
         next_token_id = fallback_token_id
+        is_fallback = True  # D-04: flag for tracking no-decision rate
 
     rollout = get_rollout(exec_state)
 
+    # -----------------------------------------------------------------
+    # train metacontroller from realized outcomes
+    # -----------------------------------------------------------------
+
+    meta_result = train_step(
+        rollout            = rollout,
+        root               = search_state.root,
+        committed_token_id = token_id,
+        meta_trajectory    = search_state.meta_trajectory,
+        meta_mlp           = search_state.meta_mlp,
+        is_fallback        = is_fallback,
+        nodes_expanded     = search_state.nodes_expanded,
+        token_duration_frames = token_duration,
+    )
+
+    # -----------------------------------------------------------------
+    # train reward head + rf_predictor against realized token return
+    # -----------------------------------------------------------------
+
+    reward_result = train_reward_head(
+        rollout        = rollout,
+        token_return   = meta_result["token_return"],
+        encode_fn      = encode_fn,
+        reward_mlp     = search_state.reward_mlp,
+        rf_predictor   = search_state.rf_predictor,
+        hidden_dim     = hidden_dim,
+    )
+
     return {
-        "rollout": rollout,
+        "rollout":       rollout,
         "next_token_id": next_token_id,
-        "search_state": search_state,
-        "interrupted": interrupted,
+        "search_state":  search_state,
+        "interrupted":   interrupted,
+        "meta_mlp":      search_state.meta_mlp,
+        "reward_mlp":    reward_result["reward_mlp"],
+        "rf_predictor":  reward_result["rf_predictor"],
+        "planner_mlp":   search_state.planner_mlp,
+        "meta_loss":     meta_result["total_loss"],
+        "reward_loss":   reward_result["reward_loss"],
+        "rf_loss":       reward_result["rf_loss"],
+        "token_return":  meta_result["token_return"],
+        "is_fallback":   is_fallback,
     }
