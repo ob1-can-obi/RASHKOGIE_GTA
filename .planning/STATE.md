@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In progress
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-05-01T08:22:41Z"
-last_activity: 2026-05-01 — Phase 4 Plan 02 complete (encoder+intuition joint training)
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-05-01T08:29:46Z"
+last_activity: 2026-05-01 — Phase 4 Plan 03 complete (reward head offline training)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 15
-  completed_plans: 11
-  percent: 73
+  completed_plans: 12
+  percent: 80
 ---
 
 # Project State
@@ -26,19 +26,19 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 4 of 5 (Module Training Pipelines)
-Plan: 2 of 6 in current phase
+Plan: 3 of 6 in current phase
 Status: In progress
-Last activity: 2026-05-01 — Phase 4 Plan 02 complete (encoder+intuition joint training)
+Last activity: 2026-05-01 — Phase 4 Plan 03 complete (reward head offline training)
 
-Progress: [█████████████░░] 73%
+Progress: [████████████████░░░] 80%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 11
+- Total plans completed: 12
 - Average duration: 212s
-- Total execution time: ~39 min
+- Total execution time: ~42 min
 
 **By Phase:**
 
@@ -47,11 +47,11 @@ Progress: [█████████████░░] 73%
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
 | 03 | 3 | 579s | 193s |
-| 04 | 2 | 469s | 235s |
+| 04 | 3 | 679s | 226s |
 
 **Recent Trend:**
 
-- Last 5 plans: 03-01 (175s), 03-02 (301s), 03-03 (103s), 04-01 (227s), 04-02 (242s)
+- Last 5 plans: 03-02 (301s), 03-03 (103s), 04-01 (227s), 04-02 (242s), 04-03 (210s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -99,6 +99,9 @@ Recent decisions affecting current work:
 - 04-02: importlib used in tests for train.py import since main_model/ is not a Python package
 - 04-02: Batch-mean loss divides by len(batch) for consistent gradient scale
 - 04-02: Max epochs reached without convergence still saves checkpoint and updates status
+- 04-03: Encoder checkpoint loading supports both session directories and direct .pt files
+- 04-03: Batch-mean loss divides by len(batch) for consistent gradient scale (same as main_model/train.py)
+- 04-03: Max epochs reached without convergence still saves checkpoint and updates status
 
 ### Pending Todos
 
@@ -123,6 +126,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:22:41Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-05-01T08:29:46Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
