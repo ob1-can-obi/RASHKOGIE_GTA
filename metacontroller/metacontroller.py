@@ -173,16 +173,18 @@ def metacontroller(
         dim=-1,
     )
 
-    assert features.shape[-1] == META_INPUT_DIM, (
-        f"Expected input dim {META_INPUT_DIM}, got {features.shape[-1]}"
-    )
-
     # -------------------------------------------------------------------------
     # Step 4: create the decision MLP if one was not passed in
     # -------------------------------------------------------------------------
 
     if meta_mlp is None:
-        meta_mlp = MetaMLP()
+        meta_mlp = MetaMLP(input_dim=features.shape[-1])
+    else:
+        # Validate dimension consistency on subsequent calls
+        expected_dim = meta_mlp.layer1.in_features
+        assert features.shape[-1] == expected_dim, (
+            f"Feature dim {features.shape[-1]} != MLP input_dim {expected_dim}"
+        )
 
     # -------------------------------------------------------------------------
     # Step 5: produce logits over the three decisions

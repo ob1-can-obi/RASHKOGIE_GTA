@@ -12,7 +12,7 @@ Each module trains independently:
 
 Flow:
     z_t + prev_token  -->  intuition_head  -->  z_next_pred   (caller's job)
-    [z_t | z_next_pred]  -->  planner_mlp (2 hidden layers)  -->  logits  -->  softmax  -->  top-k
+    [z_t | z_next_pred]  -->  planner_mlp  -->  logits  -->  softmax  -->  top-k
 """
 
 import torch
@@ -38,7 +38,6 @@ def action_planner(
     - z_next_pred: predicted next embedding from intuition head, shape [batch, fused_dim]
     - vocab_size:  number of tokens in the tokenizer vocabulary
     - planner_mlp: the trainable planner MLP (None = create fresh)
-                   Architecture: Linear(256,256) -> ReLU -> Linear(256,128) -> ReLU -> Linear(128,V)
     - hidden_dim:  hidden layer size
     - top_k:       how many candidates to return
 
@@ -68,11 +67,9 @@ def action_planner(
 
     if planner_mlp is None:
         planner_mlp = nn.Sequential(
-            nn.Linear(fused_dim * 2, hidden_dim * 2),  # 256 -> 256
+            nn.Linear(fused_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim),      # 256 -> 128
-            nn.ReLU(),
-            nn.Linear(hidden_dim, vocab_size),           # 128 -> V
+            nn.Linear(hidden_dim, vocab_size),
         )
 
     # -------------------------------------------------------------------------
