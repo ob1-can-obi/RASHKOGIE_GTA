@@ -1,7 +1,6 @@
 """
-Metacontroller — decides whether to KEEP, INTERRUPT, COMMIT_NEXT, or ROLLBACK
-given the current real state, the running action token, and search tree
-results.
+Metacontroller — decides whether to EXPLORE, INTERRUPT, COMMIT_NEXT, or ROLLBACK
+given the current real state, the running action token, and search tree results.
 
 Inputs:
 - z_t: latest real fused embedding [batch, fused_dim]
@@ -9,14 +8,25 @@ Inputs:
 - running_token_id: token currently being executed [batch]
 - elapsed_ratio: how much of the running token's duration has passed [batch, 1]
   (0.0 = just started, 1.0 = fully elapsed)
-- candidate_q: Q-values from the search tree for each candidate [batch, k]
-- candidate_ids: token ids for each candidate [batch, k]
+- candidate_q: root-level Q-values from the search tree [batch, k]
+- candidate_ids: root-level token ids [batch, k]
 - urgency: time-pressure scalar [batch, 1]  (0 = no rush, 1 = critical)
 - parent_unexplored: fraction of unopened siblings at the parent node [batch, 1]
   (0.0 = all explored, 1.0 = none explored yet)
+- current_path_value: cumulative r_edge sum from root to current node [batch, 1]
+  (how good is the branch we're currently on?)
+- best_path_value: best cumulative r_edge found so far in this search [batch, 1]
+  (how good is the best plan we've found?)
+- current_candidate_q: Q-values of the candidates at the current node [batch, top_k]
+  (0.0 for candidates not yet expanded)
+- current_candidate_durations: execution duration of each current candidate [batch, top_k]
+  (frames — longer tokens carry more risk of the world changing mid-execution)
+- current_candidate_emb: token embeddings of the current candidates, flattened
+  [batch, top_k * token_embed_dim]
+  (what kind of actions are available here?)
 
 Output:
-- decision: 0 = KEEP, 1 = INTERRUPT, 2 = COMMIT_NEXT, 3 = ROLLBACK  [batch]
+- decision: 0 = EXPLORE, 1 = INTERRUPT, 2 = COMMIT_NEXT, 3 = ROLLBACK  [batch]
 - decision_logits: raw scores for the four choices [batch, 4]
 - selected_token_id: which token to switch to (only meaningful when
   decision is INTERRUPT or COMMIT_NEXT) [batch]
@@ -25,11 +35,12 @@ Output:
 
 import torch
 from torch import nn
+from torch.distributions import Categorical
 
-KEEP = 0
-INTERRUPT = 1
-COMMIT_NEXT = 2
-ROLLBACK = 3
+EXPLORE = 0       # expand next child and descend into it — go deeper on this branch
+INTERRUPT = 1     # stop current token now, switch immediately
+COMMIT_NEXT = 2   # current token finishes, then switch to best found
+ROLLBACK = 3      # this branch is done, go back up to parent and try a sibling
 
 
 def metacontroller(
@@ -37,12 +48,19 @@ def metacontroller(
     z_running,
     running_token_id,
     elapsed_ratio,
+    token_frames_left,
     candidate_q,
     candidate_ids,
     urgency,
     parent_unexplored,
+    current_path_value,
+    best_path_value,
+    current_candidate_q,
+    current_candidate_durations,
+    current_candidate_emb,
     meta_mlp=None,
     hidden_dim=128,
+    training=False,
 ):
     """
     Decide whether to keep, interrupt, commit next, or rollback.
@@ -54,11 +72,20 @@ def metacontroller(
     - running_token_id: currently executing token, shape [batch] (long)
       (unused by MLP — kept for caller context / logging)
     - elapsed_ratio: fraction of token duration elapsed, shape [batch, 1]
+    - token_frames_left: raw frames remaining before token ends, shape [batch, 1]
     - candidate_q: Q-values from search tree, shape [batch, k]
     - candidate_ids: token ids from search tree, shape [batch, k] (long)
     - urgency: time-pressure scalar, shape [batch, 1]
     - parent_unexplored: fraction of unopened siblings at parent node,
       shape [batch, 1]  (0.0 = all explored, 1.0 = none explored)
+    - current_path_value: cumulative r_edge sum root→current_node, shape [batch, 1]
+    - best_path_value: best cumulative r_edge found so far, shape [batch, 1]
+    - current_candidate_q: Q-values of current node's candidates, shape [batch, top_k]
+      (0.0 for candidates not yet expanded into children)
+    - current_candidate_durations: execution duration of each candidate in frames,
+      shape [batch, top_k]
+    - current_candidate_emb: token embeddings of current candidates flattened,
+      shape [batch, top_k * token_embed_dim]
 
     Output dict:
     - decision: KEEP(0) / INTERRUPT(1) / COMMIT_NEXT(2) / ROLLBACK(3), shape [batch]
@@ -80,26 +107,42 @@ def metacontroller(
     # Step 2: summarize candidate quality from the search tree
     # -------------------------------------------------------------------------
 
+    # root-level summary (what can be committed to GTA)
     best_q, best_idx = candidate_q.max(dim=-1, keepdim=True)  # [batch, 1]
     mean_q = candidate_q.mean(dim=-1, keepdim=True)            # [batch, 1]
+
+    # current-node summary (what is available at the node we're exploring)
+    best_current_q = current_candidate_q.max(dim=-1, keepdim=True).values  # [batch, 1]
+    mean_current_q = current_candidate_q.mean(dim=-1, keepdim=True)        # [batch, 1]
 
     # -------------------------------------------------------------------------
     # Step 3: assemble the feature vector for the decision MLP
     # -------------------------------------------------------------------------
 
-    # drift:              [batch, fused_dim]  — how wrong the prediction was
-    # elapsed_ratio:      [batch, 1]          — how far into the current token
-    # best_q:             [batch, 1]          — best alternative available
-    # mean_q:             [batch, 1]          — average alternative quality
-    # urgency:            [batch, 1]          — time pressure
-    # parent_unexplored:  [batch, 1]          — unexplored siblings at parent
+    # drift:                       [batch, fused_dim]        how wrong the prediction was
+    # elapsed_ratio:               [batch, 1]                how far into the current token
+    # token_frames_left:           [batch, 1]                frames left before token ends
+    # best_q / mean_q:             [batch, 1] each           root-level candidate quality
+    # urgency:                     [batch, 1]                time pressure from deadline
+    # parent_unexplored:           [batch, 1]                unexplored siblings at current node
+    # current_path_value:          [batch, 1]                cumulative reward on current branch
+    # best_path_value:             [batch, 1]                best cumulative reward found so far
+    # best_current_q / mean_current_q: [batch, 1] each      current node candidate quality
+    # current_candidate_durations: [batch, top_k]            execution cost of each candidate
+    # current_candidate_emb:       [batch, top_k * embed_dim] what tokens are on the table
 
     features = torch.cat(
-        [drift, elapsed_ratio, best_q, mean_q, urgency, parent_unexplored],
+        [drift, elapsed_ratio, token_frames_left,
+         best_q, mean_q,
+         urgency, parent_unexplored,
+         current_path_value, best_path_value,
+         best_current_q, mean_current_q,
+         current_candidate_durations,
+         current_candidate_emb],
         dim=-1,
-    )  # [batch, fused_dim + 5]
+    )
 
-    input_dim = fused_dim + 5
+    input_dim = features.shape[-1]
 
     # -------------------------------------------------------------------------
     # Step 4: create the decision MLP if one was not passed in
@@ -119,10 +162,14 @@ def metacontroller(
     decision_logits = meta_mlp(features)  # [batch, 4]
 
     # -------------------------------------------------------------------------
-    # Step 6: pick the decision with highest score
+    # Step 6: pick the decision
     # -------------------------------------------------------------------------
 
-    decision = decision_logits.argmax(dim=-1)  # [batch]
+    if training:
+        dist = Categorical(logits=decision_logits)
+        decision = dist.sample()  # [batch] -- stochastic exploration
+    else:
+        decision = decision_logits.argmax(dim=-1)  # [batch] -- deterministic
 
     # -------------------------------------------------------------------------
     # Step 7: select the best candidate token from the search tree
@@ -134,8 +181,9 @@ def metacontroller(
     ).squeeze(-1)  # [batch]
 
     return {
-        "decision": decision,
-        "decision_logits": decision_logits,
+        "decision":          decision,
+        "decision_logits":   decision_logits,
+        "features":          features,          # stored in trajectory for training
         "selected_token_id": selected_token_id,
-        "meta_mlp": meta_mlp,
+        "meta_mlp":          meta_mlp,
     }
