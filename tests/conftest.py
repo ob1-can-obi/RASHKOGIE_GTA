@@ -202,26 +202,45 @@ async def test_db(tmp_path):
 
 @pytest.fixture
 def test_client(tmp_path):
-    """FastAPI TestClient with temp database."""
+    """FastAPI TestClient with temp database and temp config."""
+    import shutil
     from fastapi.testclient import TestClient
     from dashboard.server import app
     import dashboard.database as db_mod
-    original = db_mod._DEFAULT_DB_PATH
+    import dashboard.server as srv_mod
+    # Copy training_config.json to temp dir so params tests work
+    src_config = PROJECT_ROOT / "training_config.json"
+    dst_config = tmp_path / "training_config.json"
+    if src_config.exists():
+        shutil.copy(src_config, dst_config)
+    original_db = db_mod._DEFAULT_DB_PATH
     db_mod._DEFAULT_DB_PATH = tmp_path / "test.db"
+    original_root = srv_mod._PROJECT_ROOT
+    srv_mod._PROJECT_ROOT = tmp_path
     with TestClient(app) as client:
         yield client
-    db_mod._DEFAULT_DB_PATH = original
+    db_mod._DEFAULT_DB_PATH = original_db
+    srv_mod._PROJECT_ROOT = original_root
 
 
 @pytest.fixture
 def test_client_with_auth(tmp_path):
     """FastAPI TestClient with DASHBOARD_PASSWORD set."""
+    import shutil
     from fastapi.testclient import TestClient
     from dashboard.server import app
     import dashboard.database as db_mod
-    original = db_mod._DEFAULT_DB_PATH
+    import dashboard.server as srv_mod
+    src_config = PROJECT_ROOT / "training_config.json"
+    dst_config = tmp_path / "training_config.json"
+    if src_config.exists():
+        shutil.copy(src_config, dst_config)
+    original_db = db_mod._DEFAULT_DB_PATH
     db_mod._DEFAULT_DB_PATH = tmp_path / "test.db"
+    original_root = srv_mod._PROJECT_ROOT
+    srv_mod._PROJECT_ROOT = tmp_path
     with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "test_secret_123"}):
         with TestClient(app) as client:
             yield client
-    db_mod._DEFAULT_DB_PATH = original
+    db_mod._DEFAULT_DB_PATH = original_db
+    srv_mod._PROJECT_ROOT = original_root
