@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In progress
-stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-05-01T08:36:56Z"
-last_activity: 2026-05-01 — Phase 4 Plan 04 complete (action planner imitation learning)
+stopped_at: Completed 04-06-PLAN.md
+last_updated: "2026-05-01T08:44:04Z"
+last_activity: 2026-05-01 — Phase 4 Plan 06 complete (data capture scripts)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 15
-  completed_plans: 13
-  percent: 87
+  completed_plans: 14
+  percent: 93
 ---
 
 # Project State
@@ -26,19 +26,19 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 4 of 5 (Module Training Pipelines)
-Plan: 4 of 6 in current phase
+Plan: 6 of 6 in current phase
 Status: In progress
-Last activity: 2026-05-01 — Phase 4 Plan 04 complete (action planner imitation learning)
+Last activity: 2026-05-01 — Phase 4 Plan 06 complete (data capture scripts)
 
-Progress: [█████████████████░░] 87%
+Progress: [██████████████████░] 93%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 13
-- Average duration: 213s
-- Total execution time: ~46 min
+- Total plans completed: 14
+- Average duration: 214s
+- Total execution time: ~50 min
 
 **By Phase:**
 
@@ -47,11 +47,11 @@ Progress: [█████████████████░░] 87%
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
 | 03 | 3 | 579s | 193s |
-| 04 | 4 | 899s | 225s |
+| 04 | 5 | 1124s | 225s |
 
 **Recent Trend:**
 
-- Last 5 plans: 03-03 (103s), 04-01 (227s), 04-02 (242s), 04-03 (210s), 04-04 (220s)
+- Last 5 plans: 04-01 (227s), 04-02 (242s), 04-03 (210s), 04-04 (220s), 04-06 (225s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -107,6 +107,9 @@ Recent decisions affecting current work:
 - 04-04: Max epochs reached without convergence still saves checkpoint and updates status
 - 04-04: Intuition checkpoint loading supports both session directories and direct .pt files
 - 04-04: token_id=0 (idle) used as prev_token for intuition head during action planner training
+- 04-06: compute_reward returns (reward, components) tuple -- unpack correctly in capture_states.py
+- 04-06: token_start_state tracked separately from prev_state for accurate reward head state_before
+- 04-06: Session timestamps generated via datetime.now().strftime() -- never from user input (T-04-18)
 
 ### Pending Todos
 
@@ -131,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:36:56Z
-Stopped at: Completed 04-04-PLAN.md
+Last session: 2026-05-01T08:44:04Z
+Stopped at: Completed 04-06-PLAN.md
 Resume file: None

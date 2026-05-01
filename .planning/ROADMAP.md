@@ -89,7 +89,7 @@ Plans:
 - [x] 04-03-PLAN.md — Reward head offline training script with freeze on convergence (PIPE-03)
 - [x] 04-04-PLAN.md — Action planner imitation learning script (PIPE-04)
 - [ ] 04-05-PLAN.md — Coordinator CLI and end-to-end pipeline integration (PIPE-07)
-- [ ] 04-06-PLAN.md — Data capture scripts and training_data documentation (PIPE-01, PIPE-02, PIPE-03, PIPE-04)
+- [x] 04-06-PLAN.md — Data capture scripts and training_data documentation (PIPE-01, PIPE-02, PIPE-03, PIPE-04)
 
 ### Phase 5: Training Dashboard
 **Goal**: Live training metrics, decision distributions, and hyperparameter controls are accessible from a browser during any training session
@@ -114,5 +114,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
-| 4. Module Training Pipelines | 4/6 | In progress | - |
+| 4. Module Training Pipelines | 5/6 | In progress | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
