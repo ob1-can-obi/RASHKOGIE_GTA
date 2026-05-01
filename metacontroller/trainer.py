@@ -24,7 +24,10 @@ import math
 from pathlib import Path
 
 import torch
+from collections import deque
 from torch.distributions import Categorical
+from torch.optim import Adam
+from torch.nn.utils import clip_grad_norm_
 
 REWARD_HEAD_DIR = Path(__file__).resolve().parent.parent / "reward_head"
 if str(REWARD_HEAD_DIR) not in sys.path:
@@ -53,6 +56,13 @@ MIN_SEARCH_NODES = 2
 # Default anneal_steps=5000 (Claude's discretion per CONTEXT.md)
 # Exposed as a configurable parameter for later tuning per D-11
 DEFAULT_ENTROPY_ANNEAL_STEPS = 5000
+
+# Batch training constants (BATCH-01 through BATCH-04)
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_BUFFER_CAPACITY = 10000
+DEFAULT_LR = 3e-4
+DEFAULT_EPS = 1e-5
+DEFAULT_MAX_GRAD_NORM = 0.5
 
 
 def get_entropy_coeff(step, start=0.05, end=0.005, anneal_steps=DEFAULT_ENTROPY_ANNEAL_STEPS):
@@ -553,3 +563,304 @@ def train_reward_head(
         "reward_mlp":  reward_mlp,
         "rf_predictor": rf_predictor,
     }
+
+
+# =========================================================================
+# 7. TrainingState -- batch training infrastructure (Phase 2)
+# =========================================================================
+
+class TrainingState:
+    """
+    Owns the trajectory replay buffer, Adam optimizers, and batch update logic.
+
+    Replaces single-sample manual SGD with batch-averaged Adam updates.
+    This reduces gradient variance by ~sqrt(batch_size) and preserves
+    optimizer momentum across updates.
+
+    The buffer accumulates complete trajectory dicts. After every batch_size
+    trajectories, the caller triggers a batch update via update_metapolicy_batch
+    and/or update_reward_batch.
+
+    Input (constructor):
+    - meta_mlp:        metacontroller decision MLP (nn.Module)
+    - reward_mlp:      reward head MLP (nn.Module)
+    - rf_predictor:    reward feature predictor MLP (nn.Module)
+    - lr:              learning rate for Adam (default 3e-4)
+    - eps:             Adam epsilon for numerical stability (default 1e-5)
+    - max_grad_norm:   gradient clipping threshold (default 0.5)
+    - batch_size:      trajectories per batch update (default 8)
+    - buffer_capacity: maximum buffer size before oldest evicted (default 10000)
+    """
+
+    def __init__(
+        self,
+        meta_mlp,
+        reward_mlp,
+        rf_predictor,
+        lr=DEFAULT_LR,
+        eps=DEFAULT_EPS,
+        max_grad_norm=DEFAULT_MAX_GRAD_NORM,
+        batch_size=DEFAULT_BATCH_SIZE,
+        buffer_capacity=DEFAULT_BUFFER_CAPACITY,
+    ):
+        self.lr = lr
+        self.eps = eps
+        self.max_grad_norm = max_grad_norm
+        self.batch_size = batch_size
+        self.buffer_capacity = buffer_capacity
+
+        # Replay buffer (BATCH-01): fixed-capacity FIFO with O(1) append
+        self.buffer = deque(maxlen=buffer_capacity)
+
+        # Separate counter for batch trigger (Pitfall 2 from RESEARCH.md:
+        # track count separately, not len(buffer) % batch_size)
+        self.trajectories_since_update = 0
+
+        # Gradient step counter for entropy annealing
+        self.step_count = 0
+
+        # Adam optimizers (BATCH-03): one per module group
+        self.optimizer_meta = Adam(meta_mlp.parameters(), lr=lr, eps=eps)
+        self.optimizer_reward = Adam(
+            list(reward_mlp.parameters()) + list(rf_predictor.parameters()),
+            lr=lr,
+            eps=eps,
+        )
+
+    def add_trajectory(self, trajectory_dict):
+        """
+        Buffer a complete trajectory. Returns True if batch update should fire.
+
+        Input:
+        - trajectory_dict: dict with keys meta_trajectory, realized_return,
+          is_fallback, nodes_expanded, token_duration_frames, rollout
+
+        Output:
+        - ready: bool, True if trajectories_since_update >= batch_size
+        """
+        self.buffer.append(trajectory_dict)
+        self.trajectories_since_update += 1
+        return self.trajectories_since_update >= self.batch_size
+
+    def get_batch(self):
+        """
+        Return the last batch_size entries from the buffer and reset the counter.
+
+        Output:
+        - batch: list of trajectory dicts (length = batch_size)
+        """
+        batch = list(self.buffer)[-self.batch_size:]
+        self.trajectories_since_update = 0
+        return batch
+
+    def update_metapolicy_batch(self, meta_mlp, batch):
+        """
+        Batch policy gradient update over multiple trajectories.
+
+        Computes advantages for each trajectory, normalizes across the entire
+        batch (all steps pooled), then performs a single Adam step with
+        gradient clipping.
+
+        Input:
+        - meta_mlp: metacontroller MLP (nn.Module)
+        - batch:    list of trajectory dicts from get_batch()
+
+        Output dict:
+        - loss:          float, batch-mean policy + entropy loss
+        - grad_norm:     float, gradient norm before clipping
+        - clipped:       bool, True if grad_norm exceeded max_grad_norm
+        - entropy_coeff: float, current entropy coefficient
+        - step_count:    int, gradient step count after this update
+        """
+
+        # -----------------------------------------------------------------
+        # Step 1: compute advantages for each trajectory in the batch
+        # -----------------------------------------------------------------
+
+        all_advantages = []
+        all_meta_trajectories = []
+
+        for traj_dict in batch:
+            token_return = compute_token_return(traj_dict["rollout"])
+            advantages, _ = compute_metalevel_advantages(
+                traj_dict["meta_trajectory"],
+                realized_return=token_return,
+                is_fallback=traj_dict.get("is_fallback", False),
+                nodes_expanded=traj_dict.get("nodes_expanded", 0),
+                token_duration_frames=traj_dict.get("token_duration_frames", 1),
+            )
+            all_advantages.extend(advantages)
+            all_meta_trajectories.append(
+                (traj_dict["meta_trajectory"], advantages)
+            )
+
+        # -----------------------------------------------------------------
+        # Step 2: normalize advantages ACROSS the entire batch
+        # (all steps pooled, not per-trajectory)
+        # -----------------------------------------------------------------
+
+        if len(all_advantages) > 1:
+            adv_t = torch.tensor(all_advantages, dtype=torch.float32)
+            adv_mean = adv_t.mean()
+            adv_std = adv_t.std()
+            adv_t = (adv_t - adv_mean) / (adv_std + 1e-8)
+            all_advantages = adv_t.tolist()
+
+        # Redistribute normalized advantages back to per-trajectory lists
+        idx = 0
+        normalized_trajectories = []
+        for meta_traj, raw_advs in all_meta_trajectories:
+            n_steps = len(raw_advs)
+            norm_advs = all_advantages[idx : idx + n_steps]
+            normalized_trajectories.append((meta_traj, norm_advs))
+            idx += n_steps
+
+        # -----------------------------------------------------------------
+        # Step 3: compute batch loss with entropy regularization
+        # -----------------------------------------------------------------
+
+        entropy_coeff = get_entropy_coeff(self.step_count)
+
+        self.optimizer_meta.zero_grad()
+
+        total_loss = torch.tensor(0.0)
+        total_steps = 0
+
+        for meta_traj, advantages in normalized_trajectories:
+            for step, advantage in zip(meta_traj, advantages):
+                features = step["features"]
+                decision = step["decision"]
+
+                logits = meta_mlp(features)
+                dist = Categorical(logits=logits)
+                log_prob = dist.log_prob(torch.tensor(decision))
+                entropy = dist.entropy()
+
+                step_loss = -(log_prob * advantage)
+                entropy_loss = -entropy_coeff * entropy
+                total_loss = total_loss + step_loss + entropy_loss
+                total_steps += 1
+
+        # Batch-mean: divide by total number of steps across all trajectories
+        if total_steps > 0:
+            total_loss = total_loss / total_steps
+
+        # -----------------------------------------------------------------
+        # Step 4: backward + gradient clipping + optimizer step
+        # -----------------------------------------------------------------
+
+        total_loss.backward()
+
+        grad_norm = clip_grad_norm_(meta_mlp.parameters(), self.max_grad_norm)
+        clipped = bool(grad_norm.item() > self.max_grad_norm)
+
+        self.optimizer_meta.step()
+        self.step_count += 1
+
+        return {
+            "loss": total_loss.item(),
+            "grad_norm": grad_norm.item(),
+            "clipped": clipped,
+            "entropy_coeff": entropy_coeff,
+            "step_count": self.step_count,
+        }
+
+    def update_reward_batch(self, reward_mlp, rf_predictor, batch, encode_fn, hidden_dim=128):
+        """
+        Batch update for reward head and reward feature predictor.
+
+        Reproduces the forward passes from train_reward_head() for each
+        trajectory in the batch, accumulates losses, then performs a single
+        Adam step with gradient clipping.
+
+        Input:
+        - reward_mlp:    reward head MLP (nn.Module)
+        - rf_predictor:  reward feature predictor MLP (nn.Module)
+        - batch:         list of trajectory dicts from get_batch()
+        - encode_fn:     callable(gta_state) -> z_t [1, fused_dim]
+        - hidden_dim:    hidden layer size (default 128)
+
+        Output dict:
+        - reward_loss: float, batch-mean reward prediction loss
+        - rf_loss:     float, batch-mean reward feature prediction loss
+        - grad_norm:   float, gradient norm before clipping
+        - clipped:     bool, True if grad_norm exceeded max_grad_norm
+        """
+
+        self.optimizer_reward.zero_grad()
+
+        total_reward_loss = torch.tensor(0.0)
+        total_rf_loss = torch.tensor(0.0)
+
+        for traj_dict in batch:
+            rollout = traj_dict["rollout"]
+            token_return = compute_token_return(rollout)
+
+            state_before = rollout["state_before"]
+            state_after = rollout["state_after"]
+            duration = rollout["duration"]
+
+            # Encode real states
+            z_parent = encode_fn(state_before).detach()
+            z_child = encode_fn(state_after).detach()
+
+            fused_dim = z_parent.shape[-1]
+
+            # Extract real reward features
+            rf_parent = extract_reward_features(state_before)
+            rf_child = extract_reward_features(state_after)
+
+            # Build duration and time_left tensors
+            duration_t = torch.tensor([[float(duration)]], dtype=torch.float32)
+            time_left_t = torch.tensor([[0.0]], dtype=torch.float32)
+
+            # Forward pass through reward head
+            r_pred, reward_mlp = reward_head(
+                z_parent=z_parent,
+                z_child=z_child,
+                rf_parent=rf_parent,
+                rf_child=rf_child,
+                duration=duration_t,
+                time_left=time_left_t,
+                reward_mlp=reward_mlp,
+                fused_dim=fused_dim,
+                hidden_dim=hidden_dim,
+            )
+
+            # Forward pass through rf_predictor
+            delta_z = z_child - z_parent
+            rf_pred, rf_predictor = predict_reward_features(
+                z_parent=z_parent,
+                delta_z=delta_z,
+                rf_parent=rf_parent,
+                rf_predictor=rf_predictor,
+                fused_dim=fused_dim,
+                hidden_dim=hidden_dim // 2,
+            )
+
+            # Losses
+            target_return = torch.tensor([[token_return]], dtype=torch.float32)
+            reward_loss = (r_pred - target_return) ** 2
+            rf_loss = ((rf_pred - rf_child.detach()) ** 2).mean()
+
+            total_reward_loss = total_reward_loss + reward_loss
+            total_rf_loss = total_rf_loss + rf_loss
+
+        # Batch-mean
+        n = len(batch)
+        total_loss = (total_reward_loss + total_rf_loss) / n
+
+        total_loss.backward()
+
+        all_params = list(reward_mlp.parameters()) + list(rf_predictor.parameters())
+        grad_norm = clip_grad_norm_(all_params, self.max_grad_norm)
+        clipped = bool(grad_norm.item() > self.max_grad_norm)
+
+        self.optimizer_reward.step()
+
+        return {
+            "reward_loss": (total_reward_loss / n).item(),
+            "rf_loss": (total_rf_loss / n).item(),
+            "grad_norm": grad_norm.item(),
+            "clipped": clipped,
+        }
