@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Training Correctness** - Fix the three compounding bugs that corrupt every gradient update
 - [x] **Phase 2: Batch Training and Checkpointing** - Add trajectory buffer, Adam optimizer, and per-module checkpoint system
 - [x] **Phase 3: Architecture Upgrades** - Deepen MLPs, add encoder attention block, and add LayerNorm throughout
-- [ ] **Phase 4: Module Training Pipelines** - Implement the strict staged training chain with convergence-triggered freezes
+- [x] **Phase 4: Module Training Pipelines** - Implement the strict staged training chain with convergence-triggered freezes
 - [ ] **Phase 5: Training Dashboard** - Build the FastAPI live monitoring and hyperparameter control UI
 
 ## Phase Details
@@ -88,7 +88,7 @@ Plans:
 - [x] 04-02-PLAN.md — Encoder + intuition head joint training script (PIPE-02)
 - [x] 04-03-PLAN.md — Reward head offline training script with freeze on convergence (PIPE-03)
 - [x] 04-04-PLAN.md — Action planner imitation learning script (PIPE-04)
-- [ ] 04-05-PLAN.md — Coordinator CLI and end-to-end pipeline integration (PIPE-07)
+- [x] 04-05-PLAN.md — Coordinator CLI and end-to-end pipeline integration (PIPE-07)
 - [x] 04-06-PLAN.md — Data capture scripts and training_data documentation (PIPE-01, PIPE-02, PIPE-03, PIPE-04)
 
 ### Phase 5: Training Dashboard
@@ -114,5 +114,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
-| 4. Module Training Pipelines | 5/6 | In progress | - |
+| 4. Module Training Pipelines | 6/6 | Complete | 2026-05-01 |
 | 5. Training Dashboard | 0/TBD | Not started | - |

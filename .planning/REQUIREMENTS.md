@@ -38,7 +38,7 @@
 - [x] **PIPE-04**: Action planner training loop (imitation learning from player driving captures)
 - [x] **PIPE-05**: Module freeze mechanism — freeze intuition head + reward head when converged, block gradients
 - [x] **PIPE-06**: Convergence detection with configurable thresholds per module
-- [ ] **PIPE-07**: Full end-to-end training chain: encoder → intuition → reward → freeze → action planner → metacontroller RL
+- [x] **PIPE-07**: Full end-to-end training chain: encoder → intuition → reward → freeze → action planner → metacontroller RL
 
 ### Training Dashboard
 
@@ -102,7 +102,7 @@
 | PIPE-04 | Phase 4 | Complete |
 | PIPE-05 | Phase 4 | Complete |
 | PIPE-06 | Phase 4 | Complete |
-| PIPE-07 | Phase 4 | Pending |
+| PIPE-07 | Phase 4 | Complete |
 | DASH-01 | Phase 5 | Pending |
 | DASH-02 | Phase 5 | Pending |
 | DASH-03 | Phase 5 | Pending |

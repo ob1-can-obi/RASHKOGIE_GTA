@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In progress
-stopped_at: Completed 04-06-PLAN.md
-last_updated: "2026-05-01T08:44:04Z"
-last_activity: 2026-05-01 — Phase 4 Plan 06 complete (data capture scripts)
+stopped_at: Completed 04-05-PLAN.md
+last_updated: "2026-05-01T08:52:00Z"
+last_activity: 2026-05-01 — Phase 4 Plan 05 complete (coordinator CLI)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 15
-  completed_plans: 14
-  percent: 93
+  completed_plans: 15
+  percent: 100
 ---
 
 # Project State
@@ -26,19 +26,19 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 4 of 5 (Module Training Pipelines)
-Plan: 6 of 6 in current phase
-Status: In progress
-Last activity: 2026-05-01 — Phase 4 Plan 06 complete (data capture scripts)
+Plan: 6 of 6 in current phase (all complete)
+Status: Phase 4 complete
+Last activity: 2026-05-01 — Phase 4 Plan 05 complete (coordinator CLI)
 
-Progress: [██████████████████░] 93%
+Progress: [████████████████████] 100% (of planned phases 1-4)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 14
+- Total plans completed: 15
 - Average duration: 214s
-- Total execution time: ~50 min
+- Total execution time: ~54 min
 
 **By Phase:**
 
@@ -47,11 +47,11 @@ Progress: [██████████████████░] 93%
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
 | 03 | 3 | 579s | 193s |
-| 04 | 5 | 1124s | 225s |
+| 04 | 6 | 1343s | 224s |
 
 **Recent Trend:**
 
-- Last 5 plans: 04-01 (227s), 04-02 (242s), 04-03 (210s), 04-04 (220s), 04-06 (225s)
+- Last 5 plans: 04-02 (242s), 04-03 (210s), 04-04 (220s), 04-06 (225s), 04-05 (219s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -110,6 +110,10 @@ Recent decisions affecting current work:
 - 04-06: compute_reward returns (reward, components) tuple -- unpack correctly in capture_states.py
 - 04-06: token_start_state tracked separately from prev_state for accurate reward head state_before
 - 04-06: Session timestamps generated via datetime.now().strftime() -- never from user input (T-04-18)
+- 04-05: STAGE_ORDER = [encoder_intuition, reward_head, action_planner, metacontroller] matching D-03
+- 04-05: Freeze choices limited to encoder_intuition and reward_head (action_planner and metacontroller do not freeze)
+- 04-05: Stale detection checks both checkpoint mtime and started_at timestamp when no checkpoint exists
+- 04-05: _get_frozen_stage_names maps individual module names back to stage names for dependency checking
 
 ### Pending Todos
 
@@ -134,6 +138,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:44:04Z
-Stopped at: Completed 04-06-PLAN.md
+Last session: 2026-05-01T08:52:00Z
+Stopped at: Completed 04-05-PLAN.md
 Resume file: None
