@@ -47,7 +47,12 @@ Plans:
   3. Gradient norm is clipped and the clip event is logged when a large reward spike would otherwise cause a catastrophic update
   4. Stopping and restarting training resumes from the last saved checkpoint with no loss of optimizer state
   5. Each module saves a separate .pt checkpoint file per session that can be loaded independently
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — TrainingState class with buffer, Adam optimizers, batch update, gradient clipping (BATCH-01, BATCH-02, BATCH-03, BATCH-04)
+- [ ] 02-02-PLAN.md — Per-module checkpoint save/load on TrainingState (BATCH-05, BATCH-06)
+- [ ] 02-03-PLAN.md — Integration into train_step and drive_token for end-to-end batch training flow (all BATCH-*)
 
 ### Phase 3: Architecture Upgrades
 **Goal**: All modules have sufficient capacity for their inputs and all hidden representations are normalized
@@ -94,7 +99,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
-| 2. Batch Training and Checkpointing | 0/TBD | Not started | - |
+| 2. Batch Training and Checkpointing | 0/3 | In Progress | - |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
