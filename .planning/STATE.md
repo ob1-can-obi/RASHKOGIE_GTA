@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-04-30)
 
 **Core value:** The metacontroller must learn to search intelligently — using the tree to find better actions than the planner's top-1, while staying ready before the current token ends.
-**Current focus:** Phase 2 — Batch Training and Checkpointing
+**Current focus:** Phase 3 — Architecture Upgrades
 
 ## Current Position
 
-Phase: 2 of 5 (Batch Training and Checkpointing)
-Plan: 3 of 3 in current phase
-Status: Phase Complete
-Last activity: 2026-05-01 — Plan 02-03 complete (Integration wiring: train_step + drive_token)
+Phase: 3 of 5 (Architecture Upgrades)
+Plan: 0 of 3 in current phase
+Status: Ready to execute
+Last activity: 2026-04-30 — Phase 3 planned (3 plans, 2 waves)
 
 Progress: [████████░░] 40%
 
