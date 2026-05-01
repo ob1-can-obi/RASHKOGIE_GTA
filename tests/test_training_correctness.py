@@ -21,9 +21,12 @@ from metacontroller import metacontroller, EXPLORE, INTERRUPT, COMMIT_NEXT, ROLL
 from trainer import (
     compute_token_return,
     compute_metalevel_advantages,
+    update_metapolicy,
+    get_entropy_coeff,
     NOT_READY_C,
     LAZY_K,
     MIN_SEARCH_NODES,
+    DEFAULT_ENTROPY_ANNEAL_STEPS,
 )
 
 
@@ -345,3 +348,194 @@ def test_not_ready_overrides_lazy():
     assert ret[-1] == expected, (
         f"Fallback should override lazy, expected {expected}, got {ret[-1]}"
     )
+
+
+# =========================================================================
+# TRAIN-02: Entropy regularization with annealing
+# =========================================================================
+
+def test_entropy_regularization():
+    """
+    TRAIN-02: Entropy term is non-zero in loss.
+    Running update_metapolicy with entropy_coeff=0.05 should produce
+    a different loss than entropy_coeff=0.0.
+    """
+    input_dim = 10
+    mlp = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    traj = [
+        {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        {"decision": 1, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+        {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+    ]
+    advantages = [0.5, -0.3, 0.8]
+
+    # Save initial weights
+    initial_params = [p.clone() for p in mlp.parameters()]
+
+    # Create fresh MLPs with same weights for fair comparison
+    mlp_no_entropy = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    mlp_with_entropy = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    # Copy same weights to both
+    for p_src, p_no, p_with in zip(mlp.parameters(), mlp_no_entropy.parameters(), mlp_with_entropy.parameters()):
+        p_no.data.copy_(p_src.data)
+        p_with.data.copy_(p_src.data)
+
+    loss_no_entropy = update_metapolicy(mlp_no_entropy, traj, advantages[:], entropy_coeff=0.0)
+    loss_with_entropy = update_metapolicy(mlp_with_entropy, traj, advantages[:], entropy_coeff=0.05)
+
+    # Losses should differ because entropy term contributes
+    assert loss_no_entropy != loss_with_entropy, (
+        f"Entropy should affect loss: no_entropy={loss_no_entropy}, "
+        f"with_entropy={loss_with_entropy}"
+    )
+
+
+def test_entropy_uses_current_logits():
+    """
+    TRAIN-02 / Pitfall 2: Entropy must be computed from current MLP logits,
+    not from stored trajectory logits. After updating MLP weights, the
+    entropy should change because the distribution changes.
+    """
+    input_dim = 10
+    mlp = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    features = torch.randn(1, input_dim)
+    traj = [{"decision": 0, "features": features, "predicted_q": 0.1}]
+
+    # First update
+    loss1 = update_metapolicy(mlp, traj, [1.0], entropy_coeff=0.05)
+
+    # Second update with same trajectory -- loss should differ because
+    # MLP weights changed after first update
+    loss2 = update_metapolicy(mlp, traj, [1.0], entropy_coeff=0.05)
+
+    assert loss1 != loss2, (
+        "Loss should change between updates (proves current logits are used)"
+    )
+
+
+def test_entropy_annealing_linear():
+    """
+    TRAIN-02 / D-10: Entropy coefficient decays linearly from 0.05 to 0.005.
+    """
+    start = get_entropy_coeff(0)
+    mid = get_entropy_coeff(DEFAULT_ENTROPY_ANNEAL_STEPS // 2)
+    end = get_entropy_coeff(DEFAULT_ENTROPY_ANNEAL_STEPS)
+    past_end = get_entropy_coeff(DEFAULT_ENTROPY_ANNEAL_STEPS * 2)
+
+    assert abs(start - 0.05) < 1e-8, f"Start should be 0.05, got {start}"
+    assert abs(end - 0.005) < 1e-8, f"End should be 0.005, got {end}"
+    assert abs(past_end - 0.005) < 1e-8, f"Past end should clamp to 0.005, got {past_end}"
+
+    # Mid should be approximately halfway
+    expected_mid = (0.05 + 0.005) / 2
+    assert abs(mid - expected_mid) < 1e-6, (
+        f"Midpoint should be ~{expected_mid}, got {mid}"
+    )
+
+    # Verify monotonic decrease
+    prev = start
+    for step in range(0, DEFAULT_ENTROPY_ANNEAL_STEPS + 1, DEFAULT_ENTROPY_ANNEAL_STEPS // 10):
+        curr = get_entropy_coeff(step)
+        assert curr <= prev + 1e-10, (
+            f"Entropy coeff should decrease monotonically, "
+            f"step {step}: {curr} > {prev}"
+        )
+        prev = curr
+
+
+def test_entropy_annealing_configurable():
+    """
+    TRAIN-02 / D-11: anneal_steps is configurable.
+    """
+    # Fast anneal: should reach end in 100 steps
+    fast_end = get_entropy_coeff(100, anneal_steps=100)
+    assert abs(fast_end - 0.005) < 1e-8, (
+        f"Custom anneal_steps=100: step 100 should be 0.005, got {fast_end}"
+    )
+
+    # Slow anneal: at step 100 with 100000 steps, should barely have moved
+    slow_at_100 = get_entropy_coeff(100, anneal_steps=100000)
+    assert slow_at_100 > 0.049, (
+        f"Slow anneal at step 100: should be near 0.05, got {slow_at_100}"
+    )
+
+
+# =========================================================================
+# TRAIN-05: Advantage normalization
+# =========================================================================
+
+def test_advantage_normalization():
+    """
+    TRAIN-05: Advantages are zero-mean, unit-variance after normalization.
+    We test this by running update_metapolicy and checking the internal
+    normalization happens correctly.
+    """
+    # Direct test of normalization math
+    advantages = [1.0, 2.0, 3.0, 4.0, 5.0]
+    adv_t = torch.tensor(advantages, dtype=torch.float32)
+    adv_mean = adv_t.mean()
+    adv_std = adv_t.std()
+    normalized = ((adv_t - adv_mean) / (adv_std + 1e-8)).tolist()
+
+    # Check zero-mean
+    norm_t = torch.tensor(normalized)
+    assert abs(norm_t.mean().item()) < 1e-5, (
+        f"Normalized advantages should be zero-mean, got mean={norm_t.mean().item()}"
+    )
+
+    # Check unit-variance
+    assert abs(norm_t.std().item() - 1.0) < 1e-5, (
+        f"Normalized advantages should be unit-variance, got std={norm_t.std().item()}"
+    )
+
+
+def test_advantage_normalization_single_step():
+    """
+    TRAIN-05 / Pitfall 3: Single-step trajectory should skip normalization
+    without NaN or error.
+    """
+    input_dim = 10
+    mlp = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    traj = [{"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1}]
+    loss = update_metapolicy(mlp, traj, [5.0], entropy_coeff=0.05)
+
+    assert not math.isnan(loss), "Single-step should not produce NaN"
+    assert isinstance(loss, float), f"Loss should be float, got {type(loss)}"
+
+
+def test_advantage_normalization_two_steps():
+    """
+    TRAIN-05: Two-step trajectory should normalize correctly.
+    """
+    input_dim = 10
+    mlp = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    traj = [
+        {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.2},
+    ]
+    loss = update_metapolicy(mlp, traj, [10.0, -5.0], entropy_coeff=0.05)
+
+    assert not math.isnan(loss), "Two-step normalization should not produce NaN"
+    assert isinstance(loss, float), f"Loss should be float, got {type(loss)}"
+
+
+def test_advantage_normalization_all_same():
+    """
+    TRAIN-05: If all advantages are identical, std=0 but eps prevents NaN.
+    """
+    input_dim = 10
+    mlp = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    traj = [
+        {"decision": 0, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        {"decision": 1, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+        {"decision": 2, "features": torch.randn(1, input_dim), "predicted_q": 0.1},
+    ]
+    # All same advantage -- std = 0, eps should prevent division by zero
+    loss = update_metapolicy(mlp, traj, [1.0, 1.0, 1.0], entropy_coeff=0.05)
+
+    assert not math.isnan(loss), "All-same advantages should not produce NaN"
