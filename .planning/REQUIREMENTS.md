@@ -16,10 +16,10 @@
 
 ### Batch Training Infrastructure
 
-- [ ] **BATCH-01**: Trajectory replay buffer (deque, ~10K capacity) collecting full metalevel trajectories
-- [ ] **BATCH-02**: Batch updates every N=8 trajectories instead of single-sample online updates
-- [ ] **BATCH-03**: Adam optimizer (lr=3e-4, eps=1e-5) replacing manual SGD for all modules
-- [ ] **BATCH-04**: Gradient clipping (max_norm=0.5) on all policy gradient updates
+- [x] **BATCH-01**: Trajectory replay buffer (deque, ~10K capacity) collecting full metalevel trajectories
+- [x] **BATCH-02**: Batch updates every N=8 trajectories instead of single-sample online updates
+- [x] **BATCH-03**: Adam optimizer (lr=3e-4, eps=1e-5) replacing manual SGD for all modules
+- [x] **BATCH-04**: Gradient clipping (max_norm=0.5) on all policy gradient updates
 - [ ] **BATCH-05**: Per-module checkpoint saving (one .pt per module per session)
 - [ ] **BATCH-06**: Checkpoint loading and resume for interrupted training sessions
 
@@ -86,10 +86,10 @@
 | TRAIN-04 | Phase 1 | Complete |
 | TRAIN-05 | Phase 1 | Complete |
 | TRAIN-06 | Phase 1 | Complete |
-| BATCH-01 | Phase 2 | Pending |
-| BATCH-02 | Phase 2 | Pending |
-| BATCH-03 | Phase 2 | Pending |
-| BATCH-04 | Phase 2 | Pending |
+| BATCH-01 | Phase 2 | Complete |
+| BATCH-02 | Phase 2 | Complete |
+| BATCH-03 | Phase 2 | Complete |
+| BATCH-04 | Phase 2 | Complete |
 | BATCH-05 | Phase 2 | Pending |
 | BATCH-06 | Phase 2 | Pending |
 | ARCH-01 | Phase 3 | Pending |

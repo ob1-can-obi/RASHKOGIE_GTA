@@ -50,7 +50,7 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — TrainingState class with buffer, Adam optimizers, batch update, gradient clipping (BATCH-01, BATCH-02, BATCH-03, BATCH-04)
+- [x] 02-01-PLAN.md — TrainingState class with buffer, Adam optimizers, batch update, gradient clipping (BATCH-01, BATCH-02, BATCH-03, BATCH-04)
 - [ ] 02-02-PLAN.md — Per-module checkpoint save/load on TrainingState (BATCH-05, BATCH-06)
 - [ ] 02-03-PLAN.md — Integration into train_step and drive_token for end-to-end batch training flow (all BATCH-*)
 
@@ -99,7 +99,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
-| 2. Batch Training and Checkpointing | 0/3 | In Progress | - |
+| 2. Batch Training and Checkpointing | 1/3 | In Progress | - |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |

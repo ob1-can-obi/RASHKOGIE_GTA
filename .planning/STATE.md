@@ -5,32 +5,33 @@
 See: .planning/PROJECT.md (updated 2026-04-30)
 
 **Core value:** The metacontroller must learn to search intelligently — using the tree to find better actions than the planner's top-1, while staying ready before the current token ends.
-**Current focus:** Phase 1 — Training Correctness
+**Current focus:** Phase 2 — Batch Training and Checkpointing
 
 ## Current Position
 
-Phase: 1 of 5 (Training Correctness) -- COMPLETE
-Plan: 3 of 3 in current phase
-Status: Phase Complete
-Last activity: 2026-05-01 — Completed 01-03 (Entropy & Advantage Fixes)
+Phase: 2 of 5 (Batch Training and Checkpointing)
+Plan: 1 of 3 in current phase
+Status: Executing
+Last activity: 2026-05-01 — Plan 02-01 complete (TrainingState class + tests)
 
-Progress: [████░░░░░░] 21%
+Progress: [█████░░░░░] 27%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 185s
-- Total execution time: ~9 min
+- Total plans completed: 4
+- Average duration: 210s
+- Total execution time: ~14 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 3 | 556s | 185s |
+| 02 | 1 | 285s | 285s |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (165s), 01-02 (203s), 01-03 (188s)
+- Last 5 plans: 01-01 (165s), 01-02 (203s), 01-03 (188s), 02-01 (285s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -51,6 +52,10 @@ Recent decisions affecting current work:
 - 01-03: entropy_loss = -entropy_coeff * entropy_sum: negative sign maximizes entropy (prevents collapse)
 - 01-03: Advantage normalization skipped for single-step trajectories (std undefined for n=1)
 - 01-03: Epsilon 1e-8 guards division in advantage normalization for all-same advantages
+- 02-01: trajectories_since_update counter tracks batch trigger separately from buffer length (avoids off-by-one)
+- 02-01: Cross-batch advantage normalization pools all steps from all trajectories before normalizing
+- 02-01: reward_mlp and rf_predictor share a single Adam optimizer matching existing manual SGD grouping
+- 02-01: Batch-mean divides by total_steps (metapolicy) or batch count (reward) for consistent gradient scale
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
@@ -78,5 +83,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 01-03-PLAN.md (Entropy & Advantage Fixes) -- Phase 1 Complete
-Resume file: .planning/phases/01-training-correctness/01-03-SUMMARY.md
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None
