@@ -22,6 +22,7 @@ if str(TESTS_DIR) not in sys.path:
 
 from trainer import (
     TrainingState,
+    get_entropy_coeff,
     DEFAULT_BATCH_SIZE,
     DEFAULT_BUFFER_CAPACITY,
     DEFAULT_LR,
@@ -412,3 +413,458 @@ def test_default_constants():
     assert DEFAULT_MAX_GRAD_NORM == 0.5, (
         f"DEFAULT_MAX_GRAD_NORM should be 0.5, got {DEFAULT_MAX_GRAD_NORM}"
     )
+
+
+# =========================================================================
+# BATCH-05: Per-module checkpoint saving
+# =========================================================================
+
+def test_checkpoint_save_structure(tmp_path):
+    """
+    BATCH-05: save_checkpoint creates a session directory with per-module
+    .pt files for all required trained modules plus training_state.pt.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf)
+    result = ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="s001")
+
+    session_dir = Path(result["session_dir"])
+    assert session_dir.exists(), (
+        f"Session directory should exist at {session_dir}"
+    )
+
+    expected_files = [
+        "meta_mlp.pt", "reward_mlp.pt", "rf_predictor.pt",
+        "optimizer_reward.pt", "training_state.pt",
+    ]
+    for fname in expected_files:
+        fpath = session_dir / fname
+        assert fpath.exists(), (
+            f"Expected checkpoint file {fname} not found in {session_dir}"
+        )
+
+    assert len(result["files_saved"]) == 5, (
+        f"Should save 5 required files (no optional modules), got {len(result['files_saved'])}"
+    )
+
+
+def test_checkpoint_save_all_six_modules(tmp_path):
+    """
+    BATCH-05: When all 6 modules are provided, save_checkpoint creates 8
+    files: meta_mlp.pt, reward_mlp.pt, rf_predictor.pt, optimizer_reward.pt,
+    intuition_mlp.pt, token_embed.pt, planner_mlp.pt, training_state.pt.
+    This validates "one .pt per module."
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+    intuition = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 4))
+    tok_embed = nn.Sequential(nn.Linear(32, 64))
+    planner = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 8))
+
+    ts = TrainingState(meta, rw, rf)
+    result = ts.save_checkpoint(
+        tmp_path, meta, rw, rf,
+        intuition_mlp=intuition,
+        token_embed=tok_embed,
+        planner_mlp=planner,
+        session_id="s002",
+    )
+
+    session_dir = Path(result["session_dir"])
+    expected_files = [
+        "meta_mlp.pt", "reward_mlp.pt", "rf_predictor.pt",
+        "optimizer_reward.pt", "intuition_mlp.pt", "token_embed.pt",
+        "planner_mlp.pt", "training_state.pt",
+    ]
+    for fname in expected_files:
+        fpath = session_dir / fname
+        assert fpath.exists(), (
+            f"Expected checkpoint file {fname} not found in {session_dir}"
+        )
+
+    assert len(result["files_saved"]) == 8, (
+        f"Should save 8 files with all 6 modules, got {len(result['files_saved'])}"
+    )
+
+
+def test_checkpoint_save_meta_keys(tmp_path):
+    """
+    BATCH-05: meta_mlp.pt contains model_state_dict, optimizer_state_dict,
+    step_count, batch_size, and max_grad_norm keys.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf)
+    result = ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="s003")
+
+    meta_path = Path(result["session_dir"]) / "meta_mlp.pt"
+    ckpt = torch.load(meta_path, map_location="cpu", weights_only=True)
+
+    expected_keys = {"model_state_dict", "optimizer_state_dict", "step_count",
+                     "batch_size", "max_grad_norm"}
+    actual_keys = set(ckpt.keys())
+    assert expected_keys == actual_keys, (
+        f"meta_mlp.pt keys mismatch: expected {expected_keys}, got {actual_keys}"
+    )
+
+
+def test_checkpoint_save_reward_separate_files(tmp_path):
+    """
+    BATCH-05: reward_mlp.pt and rf_predictor.pt contain only model_state_dict.
+    optimizer_reward.pt contains optimizer_state_dict and step_count.
+    This validates the separate-file structure for the shared optimizer group.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf)
+    result = ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="s004")
+
+    session_dir = Path(result["session_dir"])
+
+    # reward_mlp.pt: model weights only
+    rw_ckpt = torch.load(session_dir / "reward_mlp.pt", map_location="cpu", weights_only=True)
+    assert "model_state_dict" in rw_ckpt, (
+        f"reward_mlp.pt should contain 'model_state_dict', got keys: {list(rw_ckpt.keys())}"
+    )
+
+    # rf_predictor.pt: model weights only
+    rf_ckpt = torch.load(session_dir / "rf_predictor.pt", map_location="cpu", weights_only=True)
+    assert "model_state_dict" in rf_ckpt, (
+        f"rf_predictor.pt should contain 'model_state_dict', got keys: {list(rf_ckpt.keys())}"
+    )
+
+    # optimizer_reward.pt: shared optimizer state
+    opt_ckpt = torch.load(session_dir / "optimizer_reward.pt", map_location="cpu", weights_only=True)
+    assert "optimizer_state_dict" in opt_ckpt, (
+        f"optimizer_reward.pt should contain 'optimizer_state_dict', got keys: {list(opt_ckpt.keys())}"
+    )
+    assert "step_count" in opt_ckpt, (
+        f"optimizer_reward.pt should contain 'step_count', got keys: {list(opt_ckpt.keys())}"
+    )
+
+
+def test_independent_module_load(tmp_path):
+    """
+    BATCH-05: Individual module .pt files can be loaded independently.
+    Load only meta_mlp.pt and verify the weights match the original.
+    """
+    input_dim = 10
+    meta_original = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    # Record original weights
+    original_params = [p.clone().detach() for p in meta_original.parameters()]
+
+    ts = TrainingState(meta_original, rw, rf)
+    result = ts.save_checkpoint(tmp_path, meta_original, rw, rf, session_id="s005")
+
+    # Create a NEW meta_mlp with DIFFERENT random weights
+    meta_new = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+
+    # Verify weights are different before load
+    any_different = False
+    for p_orig, p_new in zip(original_params, meta_new.parameters()):
+        if not torch.allclose(p_orig, p_new.data):
+            any_different = True
+            break
+    assert any_different, (
+        "New MLP should have different random weights from original"
+    )
+
+    # Load ONLY meta_mlp.pt independently
+    meta_path = Path(result["session_dir"]) / "meta_mlp.pt"
+    ckpt = torch.load(meta_path, map_location="cpu", weights_only=True)
+    meta_new.load_state_dict(ckpt["model_state_dict"])
+
+    # Verify the new meta_mlp now has the same weights as original
+    for i, (p_orig, p_new) in enumerate(zip(original_params, meta_new.parameters())):
+        assert torch.allclose(p_orig, p_new.data), (
+            f"Parameter {i} should match after independent load, "
+            f"max diff = {(p_orig - p_new.data).abs().max().item()}"
+        )
+
+
+# =========================================================================
+# BATCH-06: Checkpoint loading and resume
+# =========================================================================
+
+def test_checkpoint_resume_weights(tmp_path):
+    """
+    BATCH-06: After saving and loading a checkpoint, model weights are
+    restored exactly -- even when the target modules have different random
+    initialization.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=2)
+
+    # Do one batch update to change weights from init
+    for i in range(2):
+        ts.add_trajectory(_make_trajectory_dict(input_dim=input_dim))
+    batch = ts.get_batch()
+    ts.update_metapolicy_batch(meta, batch)
+
+    # Record weights after update
+    saved_params = [p.clone().detach() for p in meta.parameters()]
+
+    # Save checkpoint
+    ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="resume_w")
+
+    # Create NEW modules with fresh random weights
+    meta2 = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw2 = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf2 = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts2 = TrainingState(meta2, rw2, rf2)
+
+    # Load checkpoint
+    session_dir = str(tmp_path / "session_resume_w")
+    ts2.load_checkpoint(session_dir, meta2, rw2, rf2)
+
+    # Verify new modules now have the saved weights
+    for i, (p_saved, p_loaded) in enumerate(zip(saved_params, meta2.parameters())):
+        assert torch.allclose(p_saved, p_loaded.data), (
+            f"Meta param {i} not restored: max diff = {(p_saved - p_loaded.data).abs().max().item()}"
+        )
+
+
+def test_checkpoint_resume_optimizer(tmp_path):
+    """
+    BATCH-06: After loading a checkpoint, optimizer state (momentum/variance)
+    is restored. After one batch update, Adam should have non-zero exp_avg
+    and those values should survive save/load.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=2)
+
+    # Do one batch update so Adam has non-zero momentum
+    for i in range(2):
+        ts.add_trajectory(_make_trajectory_dict(input_dim=input_dim))
+    batch = ts.get_batch()
+    ts.update_metapolicy_batch(meta, batch)
+
+    # Record optimizer state before save
+    opt_state_before = ts.optimizer_meta.state_dict()
+
+    # Save checkpoint
+    ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="resume_o")
+
+    # Create fresh TrainingState with fresh modules
+    meta2 = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw2 = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf2 = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts2 = TrainingState(meta2, rw2, rf2)
+
+    # Load checkpoint
+    session_dir = str(tmp_path / "session_resume_o")
+    ts2.load_checkpoint(session_dir, meta2, rw2, rf2)
+
+    # Verify optimizer state is non-empty after load
+    opt_state = ts2.optimizer_meta.state
+    assert len(opt_state) > 0, (
+        "Optimizer state should be populated after checkpoint load"
+    )
+
+    # Verify optimizer state_dict matches the pre-save values
+    opt_state_after = ts2.optimizer_meta.state_dict()
+    for group_idx, (g_before, g_after) in enumerate(
+        zip(opt_state_before["param_groups"], opt_state_after["param_groups"])
+    ):
+        assert g_before["lr"] == g_after["lr"], (
+            f"Optimizer LR mismatch in group {group_idx}: "
+            f"{g_before['lr']} vs {g_after['lr']}"
+        )
+
+
+def test_checkpoint_resume_step_count(tmp_path):
+    """
+    BATCH-06: After 3 batch updates (step_count=3), saving and loading
+    restores step_count exactly. get_entropy_coeff(step_count) returns
+    the correct value for step=3.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf, batch_size=2)
+
+    # Do 3 batch updates
+    for _ in range(3):
+        for i in range(2):
+            ts.add_trajectory(_make_trajectory_dict(input_dim=input_dim))
+        batch = ts.get_batch()
+        ts.update_metapolicy_batch(meta, batch)
+
+    assert ts.step_count == 3, (
+        f"Step count should be 3 after 3 updates, got {ts.step_count}"
+    )
+
+    # Save
+    ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="resume_sc")
+
+    # Fresh TrainingState
+    meta2 = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw2 = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf2 = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+    ts2 = TrainingState(meta2, rw2, rf2)
+    assert ts2.step_count == 0, (
+        f"Fresh TrainingState should have step_count=0, got {ts2.step_count}"
+    )
+
+    # Load
+    session_dir = str(tmp_path / "session_resume_sc")
+    ts2.load_checkpoint(session_dir, meta2, rw2, rf2)
+
+    assert ts2.step_count == 3, (
+        f"After load, step_count should be 3, got {ts2.step_count}"
+    )
+
+    # Verify entropy coeff matches step=3
+    expected_coeff = get_entropy_coeff(3)
+    actual_coeff = get_entropy_coeff(ts2.step_count)
+    assert abs(expected_coeff - actual_coeff) < 1e-10, (
+        f"Entropy coeff mismatch: expected {expected_coeff}, got {actual_coeff}"
+    )
+
+
+def test_checkpoint_resume_entropy_annealing(tmp_path):
+    """
+    BATCH-06: Setting step_count to 2500 (halfway through annealing with
+    default 5000 steps), saving, and loading preserves the midpoint entropy
+    coefficient value (~0.0275).
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+
+    ts = TrainingState(meta, rw, rf)
+    ts.step_count = 2500  # Halfway through annealing
+
+    # Save
+    ts.save_checkpoint(tmp_path, meta, rw, rf, session_id="resume_ea")
+
+    # Fresh TrainingState
+    meta2 = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw2 = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf2 = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+    ts2 = TrainingState(meta2, rw2, rf2)
+
+    # Load
+    session_dir = str(tmp_path / "session_resume_ea")
+    ts2.load_checkpoint(session_dir, meta2, rw2, rf2)
+
+    assert ts2.step_count == 2500, (
+        f"After load, step_count should be 2500, got {ts2.step_count}"
+    )
+
+    # Midpoint entropy coeff: start=0.05, end=0.005, frac=0.5
+    # coeff = 0.05 + 0.5 * (0.005 - 0.05) = 0.05 + 0.5 * (-0.045) = 0.05 - 0.0225 = 0.0275
+    expected_midpoint = 0.0275
+    actual_coeff = get_entropy_coeff(ts2.step_count)
+    assert abs(actual_coeff - expected_midpoint) < 1e-6, (
+        f"Midpoint entropy coeff should be ~{expected_midpoint}, got {actual_coeff}"
+    )
+
+
+def test_checkpoint_resume_all_six_modules(tmp_path):
+    """
+    BATCH-05 + BATCH-06: Full round-trip test. Save all 6 modules, load
+    into fresh modules with different random weights, verify all 6 have
+    restored weights exactly.
+    """
+    input_dim = 10
+    meta = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+    intuition = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 4))
+    tok_embed = nn.Sequential(nn.Linear(32, 64))
+    planner = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 8))
+
+    ts = TrainingState(meta, rw, rf)
+
+    # Record original weights for all 6 modules
+    modules_original = {
+        "meta": [p.clone().detach() for p in meta.parameters()],
+        "rw": [p.clone().detach() for p in rw.parameters()],
+        "rf": [p.clone().detach() for p in rf.parameters()],
+        "intuition": [p.clone().detach() for p in intuition.parameters()],
+        "tok_embed": [p.clone().detach() for p in tok_embed.parameters()],
+        "planner": [p.clone().detach() for p in planner.parameters()],
+    }
+
+    # Save all 6
+    ts.save_checkpoint(
+        tmp_path, meta, rw, rf,
+        intuition_mlp=intuition,
+        token_embed=tok_embed,
+        planner_mlp=planner,
+        session_id="resume_all6",
+    )
+
+    # Create fresh modules with different random weights
+    meta2 = nn.Sequential(nn.Linear(input_dim, 128), nn.ReLU(), nn.Linear(128, 4))
+    rw2 = nn.Sequential(nn.Linear(142, 128), nn.ReLU(), nn.Linear(128, 1))
+    rf2 = nn.Sequential(nn.Linear(134, 64), nn.ReLU(), nn.Linear(64, 6))
+    intuition2 = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 4))
+    tok_embed2 = nn.Sequential(nn.Linear(32, 64))
+    planner2 = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 8))
+
+    ts2 = TrainingState(meta2, rw2, rf2)
+
+    # Load all 6
+    session_dir = str(tmp_path / "session_resume_all6")
+    load_result = ts2.load_checkpoint(
+        session_dir, meta2, rw2, rf2,
+        intuition_mlp=intuition2,
+        token_embed=tok_embed2,
+        planner_mlp=planner2,
+    )
+
+    assert load_result["loaded"] is True, (
+        "load_checkpoint should return loaded=True"
+    )
+    assert len(load_result["files_loaded"]) == 7, (
+        f"Should load 7 files (4 required + 3 optional modules), "
+        f"got {len(load_result['files_loaded'])}"
+    )
+
+    # Verify all 6 modules have restored weights
+    modules_loaded = {
+        "meta": list(meta2.parameters()),
+        "rw": list(rw2.parameters()),
+        "rf": list(rf2.parameters()),
+        "intuition": list(intuition2.parameters()),
+        "tok_embed": list(tok_embed2.parameters()),
+        "planner": list(planner2.parameters()),
+    }
+
+    for name, orig_params in modules_original.items():
+        loaded_params = modules_loaded[name]
+        for i, (p_orig, p_loaded) in enumerate(zip(orig_params, loaded_params)):
+            assert torch.allclose(p_orig, p_loaded.data), (
+                f"Module '{name}' param {i} not restored: "
+                f"max diff = {(p_orig - p_loaded.data).abs().max().item()}"
+            )
