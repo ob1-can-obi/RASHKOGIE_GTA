@@ -102,7 +102,14 @@ Plans:
   4. Past training sessions are listed with per-session metric summaries and can be compared by overlaying their loss curves
   5. Episode return and nodes-expanded-per-token are tracked as primary health metrics distinct from raw loss values
 **UI hint**: yes
-**Plans**: TBD
+**Plans:** 5 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — FastAPI server skeleton, SQLite database, Pydantic models, auth middleware, test scaffold (DASH-01)
+- [ ] 05-02-PLAN.md — WebSocket connection manager and JSONL collector background task (DASH-02, DASH-03, DASH-07, DASH-08)
+- [ ] 05-03-PLAN.md — Metrics and params REST routes, WebSocket endpoints, server wiring (DASH-02, DASH-03, DASH-04, DASH-07, DASH-08)
+- [ ] 05-04-PLAN.md — Sessions, checkpoints, embeddings, and predictions REST routes (DASH-05, DASH-06)
+- [ ] 05-05-PLAN.md — Vue 3 SPA frontend with all 7 sidebar views, Chart.js charts, and build (DASH-01 through DASH-08)
 
 ## Progress
 
@@ -115,4 +122,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
 | 4. Module Training Pipelines | 6/6 | Complete | 2026-05-01 |
-| 5. Training Dashboard | 0/TBD | Not started | - |
+| 5. Training Dashboard | 0/5 | Planning complete | - |
