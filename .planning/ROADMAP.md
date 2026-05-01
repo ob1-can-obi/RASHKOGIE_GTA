@@ -13,7 +13,7 @@ This is a brownfield project — all module code exists. The remaining work is: 
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Training Correctness** - Fix the three compounding bugs that corrupt every gradient update
-- [ ] **Phase 2: Batch Training and Checkpointing** - Add trajectory buffer, Adam optimizer, and per-module checkpoint system
+- [x] **Phase 2: Batch Training and Checkpointing** - Add trajectory buffer, Adam optimizer, and per-module checkpoint system
 - [ ] **Phase 3: Architecture Upgrades** - Deepen MLPs, add encoder attention block, and add LayerNorm throughout
 - [ ] **Phase 4: Module Training Pipelines** - Implement the strict staged training chain with convergence-triggered freezes
 - [ ] **Phase 5: Training Dashboard** - Build the FastAPI live monitoring and hyperparameter control UI
@@ -52,7 +52,7 @@ Plans:
 Plans:
 - [x] 02-01-PLAN.md — TrainingState class with buffer, Adam optimizers, batch update, gradient clipping (BATCH-01, BATCH-02, BATCH-03, BATCH-04)
 - [x] 02-02-PLAN.md — Per-module checkpoint save/load on TrainingState (BATCH-05, BATCH-06)
-- [ ] 02-03-PLAN.md — Integration into train_step and drive_token for end-to-end batch training flow (all BATCH-*)
+- [x] 02-03-PLAN.md — Integration into train_step and drive_token for end-to-end batch training flow (all BATCH-*)
 
 ### Phase 3: Architecture Upgrades
 **Goal**: All modules have sufficient capacity for their inputs and all hidden representations are normalized
@@ -99,7 +99,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
-| 2. Batch Training and Checkpointing | 2/3 | In Progress | - |
+| 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
 | 3. Architecture Upgrades | 0/TBD | Not started | - |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |

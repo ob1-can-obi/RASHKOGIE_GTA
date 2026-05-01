@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 2 of 5 (Batch Training and Checkpointing)
-Plan: 2 of 3 in current phase
-Status: Executing
-Last activity: 2026-05-01 — Plan 02-02 complete (Checkpoint save/load + tests)
+Plan: 3 of 3 in current phase
+Status: Phase Complete
+Last activity: 2026-05-01 — Plan 02-03 complete (Integration wiring: train_step + drive_token)
 
-Progress: [██████░░░░] 33%
+Progress: [████████░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: 213s
-- Total execution time: ~18 min
+- Total plans completed: 6
+- Average duration: 215s
+- Total execution time: ~22 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 3 | 556s | 185s |
-| 02 | 2 | 509s | 255s |
+| 02 | 3 | 735s | 245s |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (165s), 01-02 (203s), 01-03 (188s), 02-01 (285s), 02-02 (224s)
+- Last 5 plans: 01-02 (203s), 01-03 (188s), 02-01 (285s), 02-02 (224s), 02-03 (226s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -59,6 +59,10 @@ Recent decisions affecting current work:
 - 02-02: reward_mlp and rf_predictor get SEPARATE .pt files; shared optimizer saves as optimizer_reward.pt
 - 02-02: Buffer NOT restored on load -- starts empty on resume per RESEARCH.md resolved decision
 - 02-02: All torch.load calls use weights_only=True and map_location='cpu' (Pitfall 4 and 6)
+- 02-03: training_state=None default preserves 100% backward compatibility for all callers
+- 02-03: Batch update in drive_token triggers BOTH meta and reward updates together, then saves checkpoint
+- 02-03: In batch mode, drive_token skips legacy train_reward_head (reward update handled in batch)
+- 02-03: drive_token return dict includes batch_ready, meta_batch_result, reward_batch_result
 - Roadmap: Three bugs (argmax, no entropy, no not-ready penalty) must all be fixed in Phase 1 before any training is valid
 - Roadmap: Batch infrastructure (Phase 2) is a prerequisite for stable training — online single-sample REINFORCE has unbounded variance
 - Roadmap: Architecture upgrades (Phase 3) must precede the training pipeline (Phase 4) so the upgraded modules are what gets trained
@@ -86,5 +90,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 02-02-PLAN.md
+Stopped at: Completed 02-03-PLAN.md (Phase 2 complete)
 Resume file: None
