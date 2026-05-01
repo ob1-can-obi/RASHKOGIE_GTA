@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Training Correctness** - Fix the three compounding bugs that corrupt every gradient update
 - [x] **Phase 2: Batch Training and Checkpointing** - Add trajectory buffer, Adam optimizer, and per-module checkpoint system
-- [ ] **Phase 3: Architecture Upgrades** - Deepen MLPs, add encoder attention block, and add LayerNorm throughout
+- [x] **Phase 3: Architecture Upgrades** - Deepen MLPs, add encoder attention block, and add LayerNorm throughout
 - [ ] **Phase 4: Module Training Pipelines** - Implement the strict staged training chain with convergence-triggered freezes
 - [ ] **Phase 5: Training Dashboard** - Build the FastAPI live monitoring and hyperparameter control UI
 
@@ -68,7 +68,7 @@ Plans:
 Plans:
 - [x] 03-01-PLAN.md — MetaMLP class with skip connection and LayerNorm, META_INPUT_DIM constant (ARCH-01, ARCH-04)
 - [x] 03-02-PLAN.md — Encoder 2-block attention with LayerNorm, action planner 2-layer MLP (ARCH-02, ARCH-03)
-- [ ] 03-03-PLAN.md — Validation test suite for all architecture upgrades (ARCH-01, ARCH-02, ARCH-03, ARCH-04)
+- [x] 03-03-PLAN.md — Validation test suite for all architecture upgrades (ARCH-01, ARCH-02, ARCH-03, ARCH-04)
 
 ### Phase 4: Module Training Pipelines
 **Goal**: The complete encoder → intuition → reward → action planner → metacontroller training chain runs in strict order with convergence-triggered freezes
@@ -105,6 +105,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Training Correctness | 3/3 | Complete | 2026-05-01 |
 | 2. Batch Training and Checkpointing | 3/3 | Complete | 2026-05-01 |
-| 3. Architecture Upgrades | 2/3 | In progress | - |
+| 3. Architecture Upgrades | 3/3 | Complete | 2026-05-01 |
 | 4. Module Training Pipelines | 0/TBD | Not started | - |
 | 5. Training Dashboard | 0/TBD | Not started | - |
