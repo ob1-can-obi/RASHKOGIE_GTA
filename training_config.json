@@ -1,0 +1,41 @@
+{
+    "encoder_intuition": {
+        "lr": 3e-4,
+        "batch_size": 8,
+        "max_grad_norm": 0.5,
+        "eval_every_n_steps": 100,
+        "convergence": {
+            "metric": "mse",
+            "threshold": 0.05,
+            "patience": 10,
+            "mode": "min"
+        }
+    },
+    "reward_head": {
+        "lr": 3e-4,
+        "batch_size": 8,
+        "max_grad_norm": 0.5,
+        "eval_every_n_steps": 100,
+        "convergence": {
+            "metric": "mse",
+            "threshold": 0.1,
+            "patience": 10,
+            "mode": "min"
+        }
+    },
+    "action_planner": {
+        "lr": 3e-4,
+        "batch_size": 16,
+        "max_grad_norm": 0.5,
+        "eval_every_n_steps": 50,
+        "convergence": {
+            "metric": "top1_accuracy",
+            "threshold": 0.6,
+            "patience": 15,
+            "mode": "max"
+        }
+    },
+    "metacontroller": {
+        "note": "Uses existing TrainingState from Phase 2. No convergence detection -- runs until user stops."
+    }
+}

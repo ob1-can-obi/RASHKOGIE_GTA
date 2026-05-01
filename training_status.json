@@ -1,0 +1,34 @@
+{
+    "pipeline_run_id": null,
+    "stages": {
+        "encoder_intuition": {
+            "status": "pending",
+            "started_at": null,
+            "converged_at": null,
+            "final_metric": null,
+            "total_steps": null,
+            "checkpoint": null
+        },
+        "reward_head": {
+            "status": "pending",
+            "started_at": null,
+            "converged_at": null,
+            "final_metric": null,
+            "total_steps": null,
+            "checkpoint": null
+        },
+        "action_planner": {
+            "status": "pending",
+            "started_at": null,
+            "converged_at": null,
+            "final_metric": null,
+            "total_steps": null,
+            "checkpoint": null
+        },
+        "metacontroller": {
+            "status": "pending",
+            "depends_on_frozen": ["encoder_intuition", "reward_head"]
+        }
+    },
+    "frozen_modules": []
+}
