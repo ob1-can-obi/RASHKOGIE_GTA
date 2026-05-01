@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In progress
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-05-01T08:29:46Z"
-last_activity: 2026-05-01 — Phase 4 Plan 03 complete (reward head offline training)
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-05-01T08:36:56Z"
+last_activity: 2026-05-01 — Phase 4 Plan 04 complete (action planner imitation learning)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 15
-  completed_plans: 12
-  percent: 80
+  completed_plans: 13
+  percent: 87
 ---
 
 # Project State
@@ -26,19 +26,19 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 ## Current Position
 
 Phase: 4 of 5 (Module Training Pipelines)
-Plan: 3 of 6 in current phase
+Plan: 4 of 6 in current phase
 Status: In progress
-Last activity: 2026-05-01 — Phase 4 Plan 03 complete (reward head offline training)
+Last activity: 2026-05-01 — Phase 4 Plan 04 complete (action planner imitation learning)
 
-Progress: [████████████████░░░] 80%
+Progress: [█████████████████░░] 87%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 12
-- Average duration: 212s
-- Total execution time: ~42 min
+- Total plans completed: 13
+- Average duration: 213s
+- Total execution time: ~46 min
 
 **By Phase:**
 
@@ -47,11 +47,11 @@ Progress: [████████████████░░░] 80%
 | 01 | 3 | 556s | 185s |
 | 02 | 3 | 735s | 245s |
 | 03 | 3 | 579s | 193s |
-| 04 | 3 | 679s | 226s |
+| 04 | 4 | 899s | 225s |
 
 **Recent Trend:**
 
-- Last 5 plans: 03-02 (301s), 03-03 (103s), 04-01 (227s), 04-02 (242s), 04-03 (210s)
+- Last 5 plans: 03-03 (103s), 04-01 (227s), 04-02 (242s), 04-03 (210s), 04-04 (220s)
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -102,6 +102,11 @@ Recent decisions affecting current work:
 - 04-03: Encoder checkpoint loading supports both session directories and direct .pt files
 - 04-03: Batch-mean loss divides by len(batch) for consistent gradient scale (same as main_model/train.py)
 - 04-03: Max epochs reached without convergence still saves checkpoint and updates status
+- 04-04: importlib used in tests for train.py import since action_planner/ is not a Python package
+- 04-04: Batch-mean loss divides by len(batch) for consistent gradient scale (same as other train.py scripts)
+- 04-04: Max epochs reached without convergence still saves checkpoint and updates status
+- 04-04: Intuition checkpoint loading supports both session directories and direct .pt files
+- 04-04: token_id=0 (idle) used as prev_token for intuition head during action planner training
 
 ### Pending Todos
 
@@ -126,6 +131,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:29:46Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-05-01T08:36:56Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
