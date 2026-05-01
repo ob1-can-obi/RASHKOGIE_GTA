@@ -19,8 +19,12 @@ Conceptual split:
     trainer   = "learn from what happened"
 """
 
+import os
 import sys
+import json
 import math
+import logging
+import threading
 from pathlib import Path
 
 import torch
@@ -621,6 +625,7 @@ class TrainingState:
         max_grad_norm=DEFAULT_MAX_GRAD_NORM,
         batch_size=DEFAULT_BATCH_SIZE,
         buffer_capacity=DEFAULT_BUFFER_CAPACITY,
+        jsonl_dir=None,
     ):
         self.lr = lr
         self.eps = eps
@@ -645,6 +650,19 @@ class TrainingState:
             lr=lr,
             eps=eps,
         )
+
+        # JSONL output for dashboard collector (D-05)
+        self._jsonl_file = None
+        if jsonl_dir is not None:
+            jsonl_dir = Path(jsonl_dir)
+            jsonl_dir.mkdir(parents=True, exist_ok=True)
+            session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+            jsonl_path = jsonl_dir / f"{session_id}.jsonl"
+            self._jsonl_file = open(jsonl_path, "a", encoding="utf-8")
+            logging.info("JSONL output: %s", jsonl_path)
+
+        # Dashboard WS param receiver (D-06) -- initialized separately via start_param_receiver()
+        self._param_receiver = None
 
     def add_trajectory(self, trajectory_dict):
         """
@@ -672,6 +690,12 @@ class TrainingState:
         self.trajectories_since_update = 0
         return batch
 
+    def _write_jsonl(self, row: dict) -> None:
+        """Append a JSON line to the JSONL output file for dashboard ingestion."""
+        if self._jsonl_file is not None:
+            self._jsonl_file.write(json.dumps(row, separators=(",", ":")) + "\n")
+            self._jsonl_file.flush()
+
     def update_metapolicy_batch(self, meta_mlp, batch):
         """
         Batch policy gradient update over multiple trajectories.
@@ -691,6 +715,18 @@ class TrainingState:
         - entropy_coeff: float, current entropy coefficient
         - step_count:    int, gradient step count after this update
         """
+
+        # -----------------------------------------------------------------
+        # Apply any pending hot-reload params (D-06)
+        # -----------------------------------------------------------------
+
+        pending = self.get_pending_params()
+        if pending:
+            if "batch_size" in pending:
+                new_bs = int(pending["batch_size"])
+                if new_bs >= 1:
+                    self.batch_size = new_bs
+                    logging.info("Hot-reload applied: batch_size -> %d", new_bs)
 
         # -----------------------------------------------------------------
         # Step 1: compute advantages for each trajectory in the batch
@@ -775,6 +811,59 @@ class TrainingState:
 
         self.optimizer_meta.step()
         self.step_count += 1
+
+        # -----------------------------------------------------------------
+        # Step 5: emit JSONL rows for dashboard collector (D-05, DASH-03)
+        # -----------------------------------------------------------------
+
+        # Aggregate decision distributions across the batch
+        decision_totals = {"explore": 0, "rollback": 0, "interrupt": 0, "commit_next": 0}
+        total_nodes = 0
+        max_depth = 0
+        for traj_dict in batch:
+            for step_d in traj_dict["meta_trajectory"]:
+                decision = step_d["decision"]
+                # Decision mapping: 0=EXPLORE, 1=ROLLBACK, 2=INTERRUPT, 3=COMMIT_NEXT
+                if decision == 0:
+                    decision_totals["explore"] += 1
+                elif decision == 1:
+                    decision_totals["rollback"] += 1
+                elif decision == 2:
+                    decision_totals["interrupt"] += 1
+                elif decision == 3:
+                    decision_totals["commit_next"] += 1
+            total_nodes += traj_dict.get("nodes_expanded", 0)
+            max_depth = max(max_depth, len(traj_dict["meta_trajectory"]))
+
+        # Write decision_counts JSONL row
+        self._write_jsonl({
+            "type": "decision_counts",
+            "step": self.step_count,
+            "explore": decision_totals["explore"],
+            "rollback": decision_totals["rollback"],
+            "interrupt": decision_totals["interrupt"],
+            "commit_next": decision_totals["commit_next"],
+            "nodes_expanded": total_nodes // max(1, len(batch)),
+            "search_depth": max_depth,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        # Compute mean episode return from batch
+        batch_returns = [compute_token_return(traj_dict["rollout"]) for traj_dict in batch]
+        mean_episode_return = sum(batch_returns) / max(1, len(batch_returns))
+
+        # Write per-batch metric JSONL row
+        self._write_jsonl({
+            "type": "metric",
+            "step": self.step_count,
+            "loss": total_loss.item(),
+            "reward": mean_episode_return,
+            "episode_return": mean_episode_return,
+            "grad_norm": grad_norm.item(),
+            "clipped": clipped,
+            "lr": self.optimizer_meta.param_groups[0]["lr"],
+            "timestamp": datetime.utcnow().isoformat(),
+        })
 
         return {
             "loss": total_loss.item(),
@@ -1070,3 +1159,78 @@ class TrainingState:
 
         loaded = len(files_loaded) > 0
         return {"loaded": loaded, "step_count": self.step_count, "files_loaded": files_loaded}
+
+    def start_param_receiver(self, module_name: str = "metacontroller"):
+        """Start a background WebSocket client for hot-reload from dashboard (D-06).
+
+        Runs in a daemon thread. If the dashboard server is not running,
+        silently retries every 10 seconds. When a param_update message
+        arrives, it updates the optimizer lr directly and queues other
+        params (entropy_coeff, think_cost, batch_size) for the training
+        loop to read via get_pending_params().
+
+        T-05-22 mitigation: All param changes logged via logging.info.
+        """
+        host = os.environ.get("DASHBOARD_HOST", "localhost")
+        port = os.environ.get("DASHBOARD_PORT", "8000")
+        ws_url = f"ws://{host}:{port}/ws/train"
+
+        self._pending_params = {}
+        self._param_lock = threading.Lock()
+        self._param_stop = threading.Event()
+
+        def _ws_loop():
+            import websockets.sync.client as ws_client
+            while not self._param_stop.is_set():
+                try:
+                    with ws_client.connect(ws_url, close_timeout=5) as ws:
+                        ws.send(json.dumps({"type": "register", "module": module_name}))
+                        logging.info("Connected to dashboard WS | module=%s", module_name)
+                        while not self._param_stop.is_set():
+                            try:
+                                msg = ws.recv(timeout=2.0)
+                                data = json.loads(msg)
+                                if data.get("type") == "param_update":
+                                    params = data.get("params", {})
+                                    target = params.get("module", "")
+                                    if target and target != module_name:
+                                        continue
+                                    with self._param_lock:
+                                        if "lr" in params:
+                                            new_lr = float(params["lr"])
+                                            if new_lr > 0:
+                                                for pg in self.optimizer_meta.param_groups:
+                                                    pg["lr"] = new_lr
+                                                logging.info("Hot-reload: lr -> %g", new_lr)
+                                        for k in ("entropy_coeff", "think_cost", "batch_size"):
+                                            if k in params:
+                                                self._pending_params[k] = params[k]
+                                                logging.info("Hot-reload: %s queued = %s", k, params[k])
+                            except TimeoutError:
+                                continue
+                except Exception as exc:
+                    if not self._param_stop.is_set():
+                        logging.debug("Dashboard WS unavailable: %s (retry 10s)", exc)
+                        self._param_stop.wait(10.0)
+
+        t = threading.Thread(target=_ws_loop, daemon=True, name="dashboard-ws-meta")
+        t.start()
+        self._param_receiver = t
+        logging.info("Dashboard param receiver started | url=%s", ws_url)
+
+    def get_pending_params(self) -> dict:
+        """Retrieve and clear pending hot-reload params."""
+        if not hasattr(self, '_param_lock'):
+            return {}
+        with self._param_lock:
+            params = self._pending_params.copy()
+            self._pending_params.clear()
+        return params
+
+    def close(self):
+        """Cleanup JSONL file and WS receiver."""
+        if self._jsonl_file is not None:
+            self._jsonl_file.close()
+            self._jsonl_file = None
+        if hasattr(self, '_param_stop'):
+            self._param_stop.set()

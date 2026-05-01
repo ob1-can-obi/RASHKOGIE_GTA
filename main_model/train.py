@@ -21,11 +21,13 @@ On convergence:
     - Auto-updates training_status.json (fixes WARNING 2)
 """
 
+import os
 import sys
 import json
 import random
 import logging
 import argparse
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -200,6 +202,122 @@ def load_training_checkpoint(
 
 
 # ---------------------------------------------------------------------------
+# Driving context classification for embedding coloring (D-21b)
+# ---------------------------------------------------------------------------
+
+def _derive_driving_context(state: dict) -> str:
+    """Classify driving context from GTA state for embedding coloring (D-21b).
+
+    Returns 'straight', 'turn', or 'braking' based on steering and brake inputs.
+    Falls back to 'unknown' if state keys are missing.
+    """
+    try:
+        steering = abs(state.get("steering", 0.0))
+        brake = state.get("brake", 0.0)
+        if brake > 0.3:
+            return "braking"
+        elif steering > 0.3:
+            return "turn"
+        else:
+            return "straight"
+    except (TypeError, KeyError):
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard WebSocket param receiver for hot-reload (D-06)
+# ---------------------------------------------------------------------------
+
+class DashboardParamReceiver:
+    """Background WebSocket client that connects to the dashboard server
+    to receive hyperparameter updates (D-06).
+
+    Runs in a daemon thread. If the dashboard is not running, silently
+    retries every 10 seconds. When a param_update message arrives, it
+    updates the optimizer learning rate and stores other params for the
+    training loop to read.
+    """
+
+    def __init__(self, module_name: str, optimizer):
+        self.module_name = module_name
+        self.optimizer = optimizer
+        self.pending_params = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        # Dashboard URL from env or default
+        host = os.environ.get("DASHBOARD_HOST", "localhost")
+        port = os.environ.get("DASHBOARD_PORT", "8000")
+        self.ws_url = f"ws://{host}:{port}/ws/train"
+
+    def start(self):
+        """Start the background receiver thread."""
+        self._thread = threading.Thread(target=self._run, daemon=True, name="dashboard-ws")
+        self._thread.start()
+        logging.info("Dashboard param receiver started | url=%s", self.ws_url)
+
+    def stop(self):
+        """Signal the thread to stop."""
+        self._stop.set()
+
+    def get_pending_params(self) -> dict:
+        """Retrieve and clear any pending parameter updates."""
+        with self._lock:
+            params = self.pending_params.copy()
+            self.pending_params.clear()
+        return params
+
+    def _run(self):
+        """Background loop: connect, register, listen for param updates."""
+        import websockets.sync.client as ws_client
+
+        while not self._stop.is_set():
+            try:
+                with ws_client.connect(self.ws_url, close_timeout=5) as ws:
+                    # Register with module name
+                    ws.send(json.dumps({"type": "register", "module": self.module_name}))
+                    logging.info("Connected to dashboard WS | module=%s", self.module_name)
+
+                    while not self._stop.is_set():
+                        try:
+                            msg = ws.recv(timeout=2.0)
+                            data = json.loads(msg)
+                            if data.get("type") == "param_update":
+                                self._apply_params(data.get("params", {}))
+                        except TimeoutError:
+                            # No message received in timeout -- just keep waiting
+                            continue
+            except Exception as exc:
+                if not self._stop.is_set():
+                    logging.debug("Dashboard WS not available: %s (retrying in 10s)", exc)
+                    self._stop.wait(10.0)
+
+    def _apply_params(self, params: dict):
+        """Apply parameter updates. lr goes directly to optimizer; others are stored.
+
+        T-05-20 mitigation: Only applies known param keys (lr, entropy_coeff,
+        think_cost, batch_size); validates lr > 0, batch_size >= 1 before applying.
+        """
+        target_module = params.get("module", "")
+        if target_module and target_module != self.module_name:
+            return  # Not for this module
+
+        with self._lock:
+            if "lr" in params:
+                new_lr = float(params["lr"])
+                if new_lr > 0:
+                    for pg in self.optimizer.param_groups:
+                        pg["lr"] = new_lr
+                    logging.info("Hot-reload: lr updated to %g", new_lr)
+
+            # Store other params for the training loop to read
+            for key in ("entropy_coeff", "think_cost", "batch_size"):
+                if key in params:
+                    self.pending_params[key] = params[key]
+                    logging.info("Hot-reload: %s queued = %s", key, params[key])
+
+
+# ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
 
@@ -322,6 +440,27 @@ def train_encoder_intuition(
     update_training_status("encoder_intuition", "training")
 
     # -----------------------------------------------------------------------
+    # JSONL output for dashboard collector (D-05)
+    # -----------------------------------------------------------------------
+
+    session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    jsonl_dir = data_dir  # same directory as training data input
+    jsonl_path = jsonl_dir / f"{session_id}.jsonl"
+    jsonl_file = open(jsonl_path, "a", encoding="utf-8")
+
+    def write_jsonl(row: dict) -> None:
+        """Append a single JSON line to the JSONL output file."""
+        jsonl_file.write(json.dumps(row, separators=(",", ":")) + "\n")
+        jsonl_file.flush()
+
+    # -----------------------------------------------------------------------
+    # Start dashboard WebSocket param receiver (D-06)
+    # -----------------------------------------------------------------------
+
+    param_receiver = DashboardParamReceiver("encoder_intuition", optimizer)
+    param_receiver.start()
+
+    # -----------------------------------------------------------------------
     # Training loop (epoch-based, iterate over records in mini-batches)
     # -----------------------------------------------------------------------
 
@@ -335,6 +474,15 @@ def train_encoder_intuition(
         for i in range(0, len(records), batch_size):
             batch = records[i : i + batch_size]
             optimizer.zero_grad()
+
+            # Apply any pending hot-reload params (D-06)
+            pending = param_receiver.get_pending_params()
+            if pending and "batch_size" in pending:
+                new_bs = int(pending["batch_size"])
+                if new_bs >= 1:
+                    batch_size = new_bs
+                    logging.info("Hot-reload: batch_size updated to %d", batch_size)
+
             total_loss = torch.tensor(0.0)
 
             for record in batch:
@@ -377,6 +525,33 @@ def train_encoder_intuition(
                     clipped,
                 )
 
+                # JSONL metric row for dashboard collector (D-05)
+                write_jsonl({
+                    "type": "metric",
+                    "step": step_count,
+                    "loss": total_loss.item(),
+                    "grad_norm": grad_norm.item(),
+                    "clipped": clipped,
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "epoch": epoch + 1,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
+            # Embedding snapshot for PCA visualization (D-05)
+            if step_count % 500 == 0 and step_count > 0:
+                # z_t is already computed above in the training loop
+                # Use the z_t from the LAST record in the current batch
+                z_t_list = z_t.detach().cpu().squeeze().tolist()  # [128] floats
+                # Derive driving context from state_t (if speed/steering available)
+                driving_context = _derive_driving_context(state_t)
+                write_jsonl({
+                    "type": "embedding",
+                    "step": step_count,
+                    "z_t": z_t_list,
+                    "driving_context": driving_context,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
             # Convergence check
             if step_count % eval_every == 0:
                 eval_loss = total_loss.item()
@@ -405,6 +580,9 @@ def train_encoder_intuition(
                         steps=step_count,
                         checkpoint=str(ckpt_path),
                     )
+                    # Cleanup JSONL and WS receiver
+                    jsonl_file.close()
+                    param_receiver.stop()
                     return {
                         "converged": True,
                         "final_mse": eval_loss,
@@ -432,6 +610,9 @@ def train_encoder_intuition(
         steps=step_count,
         checkpoint=str(ckpt_path),
     )
+    # Cleanup JSONL and WS receiver
+    jsonl_file.close()
+    param_receiver.stop()
     return {"converged": False, "final_mse": None, "total_steps": step_count}
 
 
