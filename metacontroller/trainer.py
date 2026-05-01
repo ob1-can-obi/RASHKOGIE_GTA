@@ -24,6 +24,7 @@ import math
 from pathlib import Path
 
 import torch
+from torch.distributions import Categorical
 
 REWARD_HEAD_DIR = Path(__file__).resolve().parent.parent / "reward_head"
 if str(REWARD_HEAD_DIR) not in sys.path:
@@ -43,6 +44,37 @@ from reward_head import reward_head, extract_reward_features, predict_reward_fea
 NOT_READY_C = 0.1
 LAZY_K = 0.05
 MIN_SEARCH_NODES = 2
+
+
+# =========================================================================
+# Entropy annealing schedule (TRAIN-02, per D-10/D-11)
+# =========================================================================
+
+# Default anneal_steps=5000 (Claude's discretion per CONTEXT.md)
+# Exposed as a configurable parameter for later tuning per D-11
+DEFAULT_ENTROPY_ANNEAL_STEPS = 5000
+
+
+def get_entropy_coeff(step, start=0.05, end=0.005, anneal_steps=DEFAULT_ENTROPY_ANNEAL_STEPS):
+    """
+    Linear decay of entropy coefficient from start to end over anneal_steps.
+
+    Per D-10: linear decay (not exponential).
+    Per D-11: anneal_steps is configurable, default chosen by Claude.
+
+    Input:
+    - step: int, current gradient step count
+    - start: float, initial entropy coefficient (0.05)
+    - end: float, final entropy coefficient (0.005)
+    - anneal_steps: int, steps over which to anneal
+
+    Output:
+    - coeff: float, current entropy coefficient
+    """
+    if anneal_steps <= 0:
+        return end
+    frac = min(1.0, step / anneal_steps)
+    return start + frac * (end - start)
 
 
 def compute_token_return(rollout, gamma=0.99, bootstrap_value=None):
@@ -223,7 +255,7 @@ def compute_metalevel_advantages(
 # 4. Update metacontroller weights
 # =========================================================================
 
-def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3):
+def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3, entropy_coeff=0.05):
     """
     Policy gradient update over the full metalevel trajectory.
 
@@ -231,32 +263,63 @@ def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3):
     its advantage.  Positive advantage = good decision, strengthen it.
     Negative advantage = bad decision, weaken it.
 
+    TRAIN-02: Adds entropy regularization to prevent decision collapse.
+    TRAIN-05: Normalizes advantages to zero-mean unit-variance.
+
     Input:
     - meta_mlp: the metacontroller MLP (nn.Sequential)
-    - meta_trajectory: list of dicts with "decision" and "decision_logits"
+    - meta_trajectory: list of dicts with "decision" and "features"
     - advantages: list of floats from compute_metalevel_advantages
     - lr: learning rate
+    - entropy_coeff: float, current entropy regularization coefficient
 
     Output:
-    - total_loss: float, sum of per-step losses (for logging)
+    - total_loss: float, sum of per-step policy + entropy losses (for logging)
     """
 
+    # -----------------------------------------------------------------
+    # TRAIN-05: advantage normalization (zero-mean, unit-variance)
+    # Skip for single-step trajectories (std is undefined)
+    # -----------------------------------------------------------------
+
+    if len(advantages) > 1:
+        adv_t = torch.tensor(advantages, dtype=torch.float32)
+        adv_mean = adv_t.mean()
+        adv_std = adv_t.std()
+        adv_t = (adv_t - adv_mean) / (adv_std + 1e-8)
+        advantages = adv_t.tolist()
+
+    # -----------------------------------------------------------------
+    # TRAIN-02 + policy gradient: compute loss with entropy bonus
+    # Entropy is computed from CURRENT logits (re-run through MLP),
+    # NOT from stale stored logits (Pitfall 2 from RESEARCH.md)
+    # -----------------------------------------------------------------
+
     step_losses = []
+    entropy_sum = torch.tensor(0.0)
 
     for step, advantage in zip(meta_trajectory, advantages):
-        features = step["features"]    # [1, fused_dim + 6] — rerun to get live graph
+        features = step["features"]    # [1, fused_dim + 6] -- rerun to get live graph
         decision = step["decision"]    # int
 
-        logits         = meta_mlp(features)                     # [1, 4]
-        log_probs      = torch.log_softmax(logits, dim=-1)
-        log_prob_taken = log_probs[0, decision]
+        logits    = meta_mlp(features)                        # [1, 4]
+        dist      = Categorical(logits=logits)
+        log_prob  = dist.log_prob(torch.tensor(decision))     # scalar
+        entropy   = dist.entropy()                            # scalar
 
-        step_losses.append(-(log_prob_taken * advantage))
+        # policy gradient loss: -log_prob * advantage (REINFORCE)
+        step_losses.append(-(log_prob * advantage))
+        entropy_sum = entropy_sum + entropy
 
     if not step_losses:
         return 0.0
 
-    total_loss = torch.stack(step_losses).sum()
+    policy_loss = torch.stack(step_losses).sum()
+
+    # TRAIN-02: entropy bonus -- SUBTRACT to MAXIMIZE entropy
+    # (Pitfall 1: adding would MINIMIZE entropy, causing collapse)
+    entropy_loss = -entropy_coeff * entropy_sum
+    total_loss = policy_loss + entropy_loss
 
     # -----------------------------------------------------------------
     # backward + manual SGD step
@@ -344,6 +407,7 @@ def train_step(
     # step 4: weight update
     total_loss = update_metapolicy(
         meta_mlp, meta_trajectory, advantages, lr=lr,
+        entropy_coeff=entropy_coeff,
     )
 
     return {
@@ -353,6 +417,7 @@ def train_step(
         "total_loss":     total_loss,
         "n_search_steps": len(meta_trajectory),
         "is_fallback":    is_fallback,
+        "entropy_coeff":  entropy_coeff,
     }
 
 
