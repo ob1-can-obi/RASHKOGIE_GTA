@@ -42,6 +42,38 @@ INTERRUPT = 1     # stop current token now, switch immediately
 COMMIT_NEXT = 2   # current token finishes, then switch to best found
 ROLLBACK = 3      # this branch is done, go back up to parent and try a sibling
 
+# fused_dim(128) + scalars(10) + top_k_durations(3) + top_k_embeddings(96) = 237
+META_INPUT_DIM = 237
+
+
+class MetaMLP(nn.Module):
+    """Metacontroller decision MLP with skip connection and LayerNorm.
+
+    Architecture: input_dim -> 256 -> 256 -> 128 -> output_dim
+    Skip connection: input projected to 256 and added at layer 2
+    LayerNorm: applied at every hidden layer (before activation)
+    """
+    def __init__(self, input_dim=META_INPUT_DIM, output_dim=4):
+        super().__init__()
+        self.layer1 = nn.Linear(input_dim, 256)
+        self.ln1 = nn.LayerNorm(256)
+
+        self.layer2 = nn.Linear(256, 256)
+        self.ln2 = nn.LayerNorm(256)
+        self.skip_proj = nn.Linear(input_dim, 256)
+
+        self.layer3 = nn.Linear(256, 128)
+        self.ln3 = nn.LayerNorm(128)
+
+        self.out = nn.Linear(128, output_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        h1 = self.relu(self.ln1(self.layer1(x)))
+        h2 = self.relu(self.ln2(self.layer2(h1) + self.skip_proj(x)))
+        h3 = self.relu(self.ln3(self.layer3(h2)))
+        return self.out(h3)
+
 
 def metacontroller(
     z_t,
@@ -59,7 +91,6 @@ def metacontroller(
     current_candidate_durations,
     current_candidate_emb,
     meta_mlp=None,
-    hidden_dim=128,
     training=False,
 ):
     """
@@ -142,18 +173,16 @@ def metacontroller(
         dim=-1,
     )
 
-    input_dim = features.shape[-1]
+    assert features.shape[-1] == META_INPUT_DIM, (
+        f"Expected input dim {META_INPUT_DIM}, got {features.shape[-1]}"
+    )
 
     # -------------------------------------------------------------------------
     # Step 4: create the decision MLP if one was not passed in
     # -------------------------------------------------------------------------
 
     if meta_mlp is None:
-        meta_mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 4),
-        )
+        meta_mlp = MetaMLP()
 
     # -------------------------------------------------------------------------
     # Step 5: produce logits over the three decisions
