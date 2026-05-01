@@ -10,16 +10,13 @@ METACONTROLLER_DIR = PROJECT_ROOT / "metacontroller"
 if str(METACONTROLLER_DIR) not in sys.path:
     sys.path.insert(0, str(METACONTROLLER_DIR))
 
+from metacontroller import MetaMLP
+
 
 @pytest.fixture
 def mock_meta_mlp():
-    """A small MLP matching metacontroller's lazy init pattern: Linear->ReLU->Linear(4)."""
-    input_dim = 10
-    return nn.Sequential(
-        nn.Linear(input_dim, 128),
-        nn.ReLU(),
-        nn.Linear(128, 4),
-    )
+    """A small MetaMLP matching metacontroller's ARCH-01 architecture with test-size input."""
+    return MetaMLP(input_dim=10, output_dim=4)
 
 
 @pytest.fixture
