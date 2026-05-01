@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-04-30)
 
 **Core value:** The metacontroller must learn to search intelligently — using the tree to find better actions than the planner's top-1, while staying ready before the current token ends.
-**Current focus:** Phase 3 — Architecture Upgrades
+**Current focus:** Phase 4 — Module Training Pipelines
 
 ## Current Position
 
-Phase: 3 of 5 (Architecture Upgrades)
-Plan: 3 of 3 in current phase
-Status: Phase 3 Complete
-Last activity: 2026-05-01 — Completed 03-03 Architecture validation tests
+Phase: 4 of 5 (Module Training Pipelines)
+Plan: 0 of TBD in current phase
+Status: Context gathered, ready for planning
+Last activity: 2026-05-01 — Phase 4 context gathered
 
 Progress: [██████████░] 60%
 
@@ -80,8 +80,9 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 4 research flag: Encoder pretraining objective is not yet defined (reconstruction vs. contrastive vs. joint) — must be resolved before Phase 4 planning
-- Phase 4 research flag: Convergence thresholds (MSE < 0.05, MSE < 0.1, accuracy > 60%) are heuristics that may need empirical calibration after first training sessions
+- RESOLVED: Encoder pretraining objective decided — next-state prediction, joint with intuition head (D-01, D-02 in 04-CONTEXT.md)
+- RESOLVED: Convergence approach decided — dual criteria (threshold + patience), configurable via training_config.json (D-11, D-13 in 04-CONTEXT.md)
+- Convergence threshold VALUES (MSE < 0.05, etc.) are still heuristics — will need empirical calibration after first training sessions
 
 ## Deferred Items
 
@@ -97,5 +98,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 03-03-PLAN.md (Phase 3 complete)
-Resume file: None
+Stopped at: Phase 4 context gathered
+Resume file: .planning/phases/04-module-training-pipelines/04-CONTEXT.md
