@@ -162,9 +162,24 @@ async def ws_train(websocket: WebSocket):
 
 
 # SPA mount LAST (activated in Plan 05 when frontend is built)
+# Wrapped to skip non-HTTP (WebSocket) requests — StaticFiles only handles HTTP.
 frontend_dist = _DASHBOARD_DIR / "frontend" / "dist"
 if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="spa")
+
+    class _SPAStaticFiles(StaticFiles):
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "websocket":
+                _log.debug("SPA mount rejected WebSocket to %s", scope.get("path"))
+                await receive()  # consume the connect event
+                await send({"type": "websocket.close", "code": 1000})
+                return
+            if scope["type"] != "http":
+                return
+            await super().__call__(scope, receive, send)
+
+    app.mount(
+        "/", _SPAStaticFiles(directory=str(frontend_dist), html=True), name="spa"
+    )
 
 
 def main():
