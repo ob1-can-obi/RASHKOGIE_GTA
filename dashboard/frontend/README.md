@@ -1,5 +1,20 @@
-# Vue 3 + Vite
+# Dashboard Frontend
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 + Vite SPA for the training dashboard. Built output goes to `dist/` and is served by the FastAPI server.
 
-Learn more about IDE Support for Vue in the [Vue Docs Scaling up Guide](https://vuejs.org/guide/scaling-up/tooling.html#ide-support).
+## Development
+
+```bash
+cd dashboard/frontend
+npm install
+npm run dev        # dev server with hot reload
+npm run build      # production build to dist/
+```
+
+## Structure
+
+- `src/views/` — 7 page views (Metrics, Decisions, Hyperparams, Sessions, Embeddings, Predictions, Weights)
+- `src/components/charts/` — 9 Chart.js chart components
+- `src/stores/` — Pinia stores for metrics, params, and sessions state
+- `src/composables/useWebSocket.js` — WebSocket client with 5s auto-reconnect
+- `src/components/` — shared UI (Sidebar, AuthGate, MetricCard, StatusBadge, etc.)

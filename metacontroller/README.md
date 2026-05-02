@@ -1,13 +1,13 @@
 # Metacontroller
 
-The metacontroller is the brain that turns search tree results into a single
-token-level decision.  It sits between the action planner (which proposes
-candidates) and the executor (which sends commands to GTA).
+The metacontroller is the brain that runs MCTS-style tree search while the current
+token drives the car, and decides when to commit to the best plan found.
 
 ## The Big Picture
 
-The current token is already driving the car.  While it plays, the
-metacontroller uses that time to think about what to do next.
+The current token is already executing in GTA.  While it plays, the metacontroller
+uses those frames to search for the best next token by exploring a tree of predicted
+futures.
 
 ```
   GTA world
@@ -16,7 +16,7 @@ metacontroller uses that time to think about what to do next.
   main_model encodes everything into z_t [128]
       |
       v
-  action_planner proposes top-k candidate tokens
+  action_planner proposes top-k candidate tokens (A, B, C)
       |
       v
   +-------------------------------------------------------+
@@ -28,445 +28,454 @@ metacontroller uses that time to think about what to do next.
   |  of the current token           one step about the     |
   |  (sends controls to GTA)        next token             |
   |                                                        |
-  |  when current token ends:                              |
-  |    next token ready? use it                            |
-  |    not ready? use planner's top-1                      |
+  |  when current token ends (or INTERRUPT fires):         |
+  |    use best_path[0] from the search tree               |
+  |    fallback: planner's top-1                           |
   +-------------------------------------------------------+
       |
       v
   trainer learns from what happened
-  (realized return vs predicted, metalevel credit assignment)
+  (realized return, metalevel credit assignment, reward head update)
 ```
 
 ## Files
 
 ```
 metacontroller/
-  metacontroller.py   the decision MLP (KEEP / INTERRUPT / COMMIT_NEXT / ROLLBACK)
-  search_tree.py      tree nodes + init/step interface + metalevel trajectory recording
-  time_context.py     external timing signals (urgency, budget, elapsed ratio)
-  executor.py         per-frame token runner (one frame at a time, not a batch)
-  frame_loop.py       the main driver — interleaves executor + search per frame
-  trainer.py          computes returns, metalevel credit assignment, weight updates
+  metacontroller.py   decision MLP (EXPLORE / INTERRUPT / COMMIT_NEXT / ROLLBACK)
+  search_tree.py      MCTS tree nodes, expansion, best-path tracking, init/step interface
+  time_context.py     external timing signals (urgency, budget, elapsed ratio, token_frames_left)
+  executor.py         per-frame token runner — unmerges BPE token, plays frame by frame
+  reward.py           pure math reward formula (ground truth, used by executor)
+  frame_loop.py       main driver — interleaves executor + search per frame, triggers training
+  trainer.py          computes returns, metalevel credit assignment, policy gradient update,
+                      reward head training
 ```
 
 ## The Frame Loop
 
-This is the core idea.  The current token buys time for thinking.
+The current token buys thinking time.
 
 ```
 current token = merged_token_500, duration = 20 frames
 
-frame 1:   executor plays frame 1   |   search expands one node
-frame 2:   executor plays frame 2   |   search expands one node
-frame 3:   executor plays frame 3   |   search expands one node
+frame 1:   executor plays frame 1   |   search: EXPLORE(A) → descend into A
+frame 2:   executor plays frame 2   |   search: EXPLORE(A3) → descend into A3
+frame 3:   executor plays frame 3   |   search: ROLLBACK → back to A
+frame 4:   executor plays frame 4   |   search: EXPLORE(A2) → descend into A2
 ...
-frame 20:  executor plays frame 20  |   search should have next token ready
+frame 20:  executor plays frame 20  |   search: COMMIT_NEXT → commit best_path[0]
 ```
 
-The metacontroller is NOT choosing the current frame's action.  The current
-token is already handling that.  The metacontroller is choosing: what should
-I do AFTER this token finishes?
-
-```
-1. start current token
-2. while current token is running:
-     - send next control frame to GTA
-     - read latest game state
-     - encode state into z_t
-     - search_step: expand one node, ask metacontroller
-3. when current token ends:
-     - if metacontroller found next token: use it
-     - otherwise: use planner's top-1 (fallback)
-4. trainer learns from the rollout
-5. repeat with next token
-```
-
-If the metacontroller says INTERRUPT mid-token, the executor stops early
-and switches immediately.  GTA never waits.
+The metacontroller is NOT choosing the current frame's action.  The current token
+handles that.  The metacontroller is choosing: **what should I execute AFTER this token?**
 
 ## How the Search Tree Works
 
-Each token duration builds a fresh tree.  One search step per frame.
+Each token duration builds a fresh MCTS tree.  One search step per frame.
 
-**Step 1: The action planner gives us candidates.**
-
-The planner looks at the current state z_t and says "here are the top 3 tokens
-I think are good."  These become the root's children-to-explore.
+### Step 1: Action planner gives root candidates
 
 ```
          [root: z_t]
         /     |      \
-   token_A  token_B  token_C     <-- candidates from planner
+   token_A  token_B  token_C     <-- top-k from action planner
    (unopened) (unopened) (unopened)
 ```
 
-**Step 2: We explore ONE candidate at a time.**
+### Step 2: Each expansion does three things
 
-We pick the first unopened candidate and ask the intuition head:
-"If I do this token, what will the world look like?"
+**a) Intuition head predicts z_child.**
 
-```
-         [root: z_t]
-        /     |      \
-   [token_A]  token_B  token_C
-   z_child_A  (unopened) (unopened)
-   r = 0.7
-```
-
-**Step 3: Unpacking merged tokens.**
-
-Our tokenizer uses BPE, so a single token might actually be a sequence of
-base actions merged together.  Before the intuition head can predict, we
-unpack the merged token and roll through each base token one by one:
+Merged BPE tokens are unpacked first, then the intuition head rolls through each
+base token:
 
 ```
-merged token 500 --> unmerge --> [base_12, base_7, base_3]
+merged token 500 → unmerge → [base_12, base_7, base_3]
 
-z_0 = node.z (starting state)
-                    |
-     intuition_head(z_0, base_12)
-                    |
-                    v
-                   z_1
-                    |
-     intuition_head(z_1, base_7)
-                    |
-                    v
-                   z_2
-                    |
-     intuition_head(z_2, base_3)
-                    |
-                    v
-                   z_3  <-- this is z_child, the predicted state
-                            after the full merged token plays out
+z_0 = node.z
+   intuition_head(z_0, base_12) → z_1
+   intuition_head(z_1, base_7)  → z_2
+   intuition_head(z_2, base_3)  → z_3 = z_child
 ```
 
-A base token (not merged) just returns itself: `unmerge(12) -> [12]`.
-One pass through the intuition head, done.
-
-**Step 4: The reward function scores the transition.**
+**b) Reward head NN scores the transition.**
 
 ```
-reward_fn(z_parent, z_child) --> r_edge
+reward_head(z_parent, z_child, rf_parent, rf_child, duration, time_left) → r_edge
 ```
 
-This is a learned reward estimator that works on embeddings.  It is NOT the
-same as the real reward_head (which needs actual GTA frames).
+rf (reward features) = [wp_dist, hp, v_engine_hp, v_body_hp, road_dist, dead].
+These explicit signals are what actually determines reward — the network does not
+have to discover them buried in a 128-dim embedding.
 
-**Step 5: The metacontroller decides.**
+For root nodes, rf comes from the real GTA state.  For child nodes, rf is predicted
+by `predict_reward_features(z_parent, delta_z, rf_parent) → rf_child`.
 
-After each expansion, the metacontroller looks at everything and picks one
-of four decisions:
+**c) Action planner runs on z_child to populate the child's candidate set.**
+
+This is what enables depth > 1.  Every child gets its own top-k candidates, so the
+metacontroller can EXPLORE deeper:
 
 ```
-                  METACONTROLLER
-                       |
-    inputs:            |           output:
-    - drift            |           one of four decisions
-    - elapsed_ratio    |
-    - best_q           +---------> KEEP
-    - mean_q           |           INTERRUPT
-    - urgency          |           COMMIT_NEXT
-    - parent_unexplored|           ROLLBACK
+expand(A) → z_A predicted → action_planner(z_A) → [A1, A2, A3]
+expand(A3) → z_A3 predicted → action_planner(z_A3) → [A31, A32, A33]
 ```
+
+### Step 3: Metacontroller decides
+
+After each expansion, the metacontroller picks one of four decisions.
 
 ## The Four Decisions
 
-### KEEP
+### EXPLORE
 
-Keep expanding at the current node.  "I'm not done looking yet."
-
-```
-         [root]
-        /   |   \
-     [A]    B    C
-    /   \
-  [A1]  A2        <-- KEEP: open A2 next
-```
-
-Use when:
-- The current token still looks fine
-- The tree does not show a clearly better option
-- There is remaining budget to explore
-
-### INTERRUPT
-
-Stop the current token early and switch to the best candidate.
-"The current action is going badly, switch NOW."
+Expand the next candidate at the current node and **descend into it**.
 
 ```
-Currently executing token X in GTA...
-Metacontroller says INTERRUPT
---> stop token X mid-execution
---> immediately start the best candidate from the tree
+Before:                        After EXPLORE(A):
+     [root]                          [root]
+    /   |   \                       /   |   \
+   A    B    C                    [A]   B    C
+                                  / \
+                               [A1] A2, A3  <-- now at A, next: A2
+                              current_node = A
 ```
 
-Use when:
-- The current token looks bad compared to a new candidate
-- Time pressure is high
-- Continuing is not worth the risk
-
-### COMMIT_NEXT
-
-Select the best candidate as the next token.  "I'm confident, let's go."
-
-```
-Search tree found that token_A has Q = 0.9
-Metacontroller says COMMIT_NEXT
---> when current token finishes, start token_A
-```
-
-Use when:
-- One candidate is clearly the best
-- Search confidence is high
-- Time to move forward
+The tree grows deeper.  Next step will expand A2 or go deeper into A1.
 
 ### ROLLBACK
 
-Backtrack to the parent node and try a different branch.
-"This path is not great, let me think more."
+Go back up to the parent.  Try a sibling on the next step.
 
 ```
-Before ROLLBACK:                  After ROLLBACK:
-
-     [root]                           [root]
-    /   |   \                        /   |   \
-  [A]   B    C                     [A]  [B]   C
-  / \                              / \    \
-[A1][A2]  <-- all bad            [A1][A2] [B1]  <-- trying B now
+Before (current_node = A3):        After ROLLBACK:
+     [root]                              [root]
+    /   |   \                           /   |   \
+  [A]   B    C                        [A]   B    C
+  / \                                 / \
+[A1][A2][A3]                        [A1][A2][A3]
+         ^                           current_node = A (next: nothing, auto-rollback to root)
+         current_node
 ```
 
-Use when:
-- All children at the current node look bad
-- The parent still has unexplored siblings
-- The value of thinking more (exploring other branches) is high
+Use when the current branch looks worse than the best plan found so far.
 
-If the metacontroller keeps rolling back and trying new branches, it
-accumulates Q-values across ALL explored paths.  When it finally decides
-COMMIT_NEXT, it picks the best one it found across everything.
+### INTERRUPT
+
+Stop the current GTA token early.  Switch to `best_path[0]` immediately.
+
+Use when: the current token is going badly and waiting is not worth the risk.
+
+### COMMIT_NEXT
+
+Finish the current token, then execute `best_path[0]`.
+
+Use when: search found a good enough plan and there is no reason to rush.
+
+## Best Path Tracking
+
+Every expansion updates the best path found so far:
+
+```python
+path_value = sum of r_edge from root down to the new leaf
+if path_value > best_path_value:
+    best_path = [A, A3, A32]   # full token sequence from root to leaf
+    best_path_value = path_value
+```
+
+`best_path[0]` is always the root-level token to commit to GTA.  The rest of the
+path is the predicted future that justified picking it.
+
+**This closes the learning loop:** the metacontroller's EXPLORE/ROLLBACK decisions
+determine what `best_path` ends up being.  When it commits, `best_path[0]` is
+executed.  The realized reward trains the metacontroller on whether its exploration
+was good.
+
+## Metacontroller Features
+
+The decision MLP sees these inputs every step:
+
+**World state**
+
+| Feature | Shape | Meaning |
+|---|---|---|
+| `drift` | `[batch, fused_dim]` | `z_t - z_running` — how wrong the prediction was when this token was committed |
+| `elapsed_ratio` | `[batch, 1]` | How far into the current token (0=start, 1=done) |
+| `token_frames_left` | `[batch, 1]` | Raw frames left before the current token ends |
+| `urgency` | `[batch, 1]` | Time pressure from the planning deadline |
+
+**Root-level candidate quality** (what can be committed to GTA)
+
+| Feature | Shape | Meaning |
+|---|---|---|
+| `best_q` | `[batch, 1]` | Best Q-value among root children |
+| `mean_q` | `[batch, 1]` | Average Q-value among root children |
+
+**Branch quality** (where the search currently is)
+
+| Feature | Shape | Meaning |
+|---|---|---|
+| `parent_unexplored` | `[batch, 1]` | Fraction of current node's candidates still unexpanded |
+| `current_path_value` | `[batch, 1]` | Cumulative r_edge from root down to current_node |
+| `best_path_value` | `[batch, 1]` | Best cumulative r_edge found so far in this search |
+
+`current_path_value` vs `best_path_value` is the key EXPLORE vs ROLLBACK signal:
+- `current_path_value > best_path_value` → this branch is beating the current best → EXPLORE deeper
+- `current_path_value << best_path_value` → this branch is bad → ROLLBACK
+
+**Current node's candidates** (what tokens are on the table right now)
+
+| Feature | Shape | Meaning |
+|---|---|---|
+| `best_current_q` | `[batch, 1]` | Best Q among current node's expanded children |
+| `mean_current_q` | `[batch, 1]` | Average Q among current node's expanded children (0 for unexpanded) |
+| `current_candidate_durations` | `[batch, top_k]` | Execution cost of each candidate in frames |
+| `current_candidate_emb` | `[batch, top_k × token_embed_dim]` | Token embeddings of the candidates — what *kind* of actions are available |
+
+`current_candidate_emb` comes from the intuition head's `token_embed` table (an `nn.Embedding` of
+dim 32).  See the full explanation below.
+
+`current_candidate_durations` matters because a 30-frame token carries more risk than a 5-frame
+one — the world can change a lot in 30 frames, so the metacontroller should be more willing to
+EXPLORE before committing to a long token.
+
+Total feature dimension: `fused_dim + 10 + top_k × (1 + token_embed_dim)`.
+With defaults (fused_dim=128, top_k=3, token_embed_dim=32): **237**.
+
+---
+
+## Token Embeddings — What They Are and Why They Matter
+
+### What a token actually is
+
+Every token in the vocabulary is a **multi-frame control chunk**: a sequence of
+quantized GTA control frames, each with four fields:
+
+```
+right_steer    0–9  (10 bins over [0.0, 1.0])
+left_steer     0–9
+forward_throttle 0–9
+brake          0–9
+```
+
+Base tokens are single frames — one discrete control snapshot.  The BPE merge
+step fuses frequently co-occurring base tokens into longer merged tokens.  A
+merged token might be 8 frames of "full throttle, 0.33 right steer" — a
+short highway straight.  Another might be 15 frames of "left steer ramping
+up then easing off" — a smooth left curve.
+
+### Token IDs are arbitrary integers
+
+Token IDs are assigned in the order they are created during BPE:
+- Token 0: idle frame (rs0_ls0_ft0_b0)
+- Token 1: first unique base frame seen
+- Token 500: the 500th entry added — could be anything
+
+The numbers carry **no semantic meaning**.  Token 500 is not "more" than
+token 100.  You cannot do arithmetic on them.  The metacontroller cannot
+learn anything useful from the raw integer IDs.
+
+### The embedding table
+
+`token_embed` is `nn.Embedding(vocab_size, 32)` inside the intuition head.
+It is a lookup table: every token ID maps to a **32-dimensional float
+vector**.  At first these are random.  During intuition head training,
+gradient descent adjusts them.
+
+The intuition head is trained to predict the next world embedding:
+
+```
+intuition_head(z_t, prev_token_id) → z_next_pred ≈ real z_{t+1}
+```
+
+The gradient flows back through the token embedding lookup.  For the
+prediction to be accurate, the embedding of `prev_token_id` must encode
+something useful about what that token *does* to the world.
+
+Over time, tokens that produce **similar world effects** end up with
+**similar embedding vectors**:
+
+```
+token 237  rs0_ls0_ft9_b0  (full throttle, straight)
+token 241  rs0_ls0_ft8_b0  (near-full throttle, straight)
+  → embeddings drift together — both "go fast straight"
+
+token 88   rs0_ls6_ft5_b0  (moderate left steer, half throttle)
+token 312  merged: [ls5_ft5] + [ls7_ft4]  (left curve, decelerating)
+  → embeddings drift together — both "turn left"
+
+token 15   rs0_ls0_ft0_b9  (full brake)
+  → embedding drifts away from throttle tokens — opposite world effect
+```
+
+### What the metacontroller sees
+
+When three candidates are available at the current node, their embeddings
+are looked up and **flattened**:
+
+```
+candidate_0 embedding  [32 dims]  ─┐
+candidate_1 embedding  [32 dims]  ─┼─→  current_candidate_emb  [96 dims]
+candidate_2 embedding  [32 dims]  ─┘
+```
+
+The metacontroller MLP receives all 96 numbers.  It can learn patterns that
+pure Q-value summaries cannot capture:
+
+| Situation | What embeddings reveal | Useful decision |
+|---|---|---|
+| All 3 candidates cluster near "full throttle straight" | Tokens are interchangeable — any will do | COMMIT quickly |
+| Candidates are spread across brake / steer / throttle regions | Tokens have very different effects — worth checking which the reward head prefers | EXPLORE more |
+| One candidate is near the "brake" cluster | Something dangerous may be nearby — reward head may score it very differently | EXPLORE that candidate before committing |
+| Candidates all cluster near a token from a previous crash | The agent has been in this situation before | Prefer ROLLBACK to a different branch |
+
+The Q values tell the metacontroller *how good* each option looks right now.
+The embeddings tell it *what kind* of action each option is — context that
+matters when Q values are close or when candidates haven't been expanded yet
+(Q = 0 for unexpanded nodes, so embeddings are the only signal available).
 
 ## Time Context
 
-The metacontroller needs to know about the real world while it thinks.
-The time_context module computes this from raw frame counts:
+Updated every frame from raw frame counts:
 
 ```
-raw signals                          tensors for metacontroller
------------                          -------------------------
-current_frame = 1042        -->      elapsed_ratio = 0.6
-deadline_frame = 1060                urgency = 0.7
-token_start_frame = 1030             budget_remaining = 4
-token_duration = 20 frames
+current_frame = 1042        →  elapsed_ratio = 0.6
+deadline_frame = 1060           urgency = 0.7
+token_start_frame = 1030        budget_remaining = 4
+token_duration = 20 frames      token_frames_left = 8
 nodes_expanded = 6
 max_budget = 10
 ```
 
-Time context is refreshed at EVERY node expansion, not just once at the
-start.  As the search burns frames thinking, urgency goes up and budget
-goes down.  The metacontroller sees this in real time.
+`token_frames_left` tells the metacontroller how much real execution time is left
+before it MUST have a decision ready.  As this approaches zero, urgency forces a commit.
 
 ## The Executor
 
-The executor is a per-frame token runner.  It plays ONE frame at a time
-so the frame loop can interleave it with search.
+Per-frame token runner.  Plays ONE frame at a time so the frame loop can interleave
+search alongside it.
 
 ```
-execution_init(token_id, token_table)
-     |
-     v
-execution_frame()  <-- called once per frame by the frame loop
-     |
-     +-- send controls to GTA
-     +-- read new state
-     +-- compute env reward for this one frame
-     +-- record to rollout
-     |
-     v
-get_rollout()  <-- called when token is done, returns everything
+execution_init(token_id, token_table, unmerge_fn, read_state_fn)
+  → unmerges BPE token → flattened per-frame control schedule
+
+execution_frame()  ← called once per frame by the frame loop
+  → send controls to GTA
+  → read new state
+  → compute reward (math formula from reward.py)
+  → record to rollout
+
+get_rollout()  ← called when token is done
+  → returns per-frame rewards, states, duration
 ```
 
-The executor exposes init + frame + get_rollout, not a blocking loop.
-The frame loop calls execution_frame and search_step alternately.
-
-The environment reward (env_reward_fn) is the hand-designed formula from
-reward_head.py applied to real GTA frames.  It is ground truth, not a
-learned predictor.  The learned reward estimator (reward_fn) is a different
-thing that only runs inside the search tree on embeddings.
+`reward.py` is pure math (distance progress, collision, off-road, waypoint).
+It runs on real GTA states to produce ground-truth per-frame rewards.
+It is completely separate from the reward head NN, which runs on embeddings
+inside the search tree.
 
 ## The Trainer
 
-Learning happens in trainer.py, completely separate from execution.
-The trainer takes the rollout from the executor and does three things.
+Learning happens after each token execution.
 
-### 1. Compute the Realized Token Return
-
-A committed token runs for multiple frames.  The thing we compare against
-the tree's predicted value is the discounted sum of ALL per-frame rewards,
-not just one instant reward.
+### 1. Realized Token Return
 
 ```
-token runs for k frames, producing rewards r_0, r_1, ..., r_{k-1}
-
-R_token = r_0 + gamma * r_1 + gamma^2 * r_2 + ... + gamma^(k-1) * r_{k-1}
-
-optionally bootstrapped:
-
-R_token = (sum of discounted rewards) + gamma^k * V(next_real_state)
+R_token = r_0 + gamma*r_1 + gamma^2*r_2 + ... + gamma^(k-1)*r_{k-1}
+        + gamma^k * V(next_state)   (optional bootstrap)
 ```
 
-Why bootstrapping?  Because the token ends but the episode continues.  The
-value of the state we land in matters.  Without it we are only judging the
-token by what happened during it, ignoring where it left us.
+### 2. Tree Backup
 
-### 2. Back Up the Return into the Tree
-
-The tree predicted a Q-value for the committed branch.  Now we know the
-actual return.  We update that branch's N/W/Q so the tree reflects reality.
-
-```
-before backup:                    after backup:
-  child.q = 0.7 (predicted)        child.q = 0.65 (blended with real)
-  child.n = 3                       child.n = 4
-```
+The committed branch's N/W/Q is updated with the real return so the tree
+reflects what actually happened.
 
 ### 3. Metalevel Credit Assignment
 
-This is the key part that makes the metacontroller actually learn.
-
-During search, the metacontroller made a sequence of decisions:
+Every search decision gets credit based on the final outcome:
 
 ```
-step 0: expand A     --> KEEP        (cost: -think_cost)
-step 1: expand A1    --> KEEP        (cost: -think_cost)
-step 2: expand A2    --> ROLLBACK    (cost: -think_cost)
-step 3: expand B     --> KEEP        (cost: -think_cost)
-step 4: expand B1    --> COMMIT_NEXT (gets: R_token)
+step 0: EXPLORE(A)     → -think_cost
+step 1: EXPLORE(A3)    → -think_cost
+step 2: ROLLBACK       → -think_cost
+step 3: EXPLORE(B)     → -think_cost
+step 4: COMMIT_NEXT    → R_token
 ```
 
-Every KEEP and ROLLBACK costs a small think_cost (time spent deliberating
-instead of acting).  The final COMMIT gets the realized token return.
+Discounted returns are computed backward.  Advantage = return - predicted_Q.
 
-We compute discounted returns backward from the end:
+- If ROLLBACK led to finding a better branch, it gets positive advantage
+- If excessive EXPLOREs explored a dead end, they get negative advantage
+- The metacontroller learns to search efficiently
 
-```
-step 4: return = R_token
-step 3: return = -think_cost + gamma * R_token
-step 2: return = -think_cost + gamma * (step 3 return)
-step 1: return = -think_cost + gamma * (step 2 return)
-step 0: return = -think_cost + gamma * (step 1 return)
-```
+### 4. Policy Gradient Update
 
-Then each step's advantage = its return - the predicted Q at that step.
+REINFORCE over the full metalevel trajectory.  Features (not logits) are stored
+per step so gradients flow through the live meta_mlp during training.
 
-```
-advantage > 0:  "this search decision led to a good outcome, do it more"
-advantage < 0:  "this search decision wasted time or led somewhere bad"
-```
+### 5. Reward Head Training
 
-This means:
-- If ROLLBACK at step 2 led to finding a better branch (B) that produced
-  high return, that ROLLBACK gets positive advantage.  The metacontroller
-  learns that rolling back in similar situations is a good idea.
-- If a series of KEEPs explored a dead end before the commit, those KEEPs
-  get negative advantage (they cost think_cost and did not help).
-- If the final COMMIT picked a bad token, the COMMIT itself gets blame,
-  but so do the earlier decisions that failed to find something better.
+After each token, the reward head and rf_predictor are trained against the
+realized return:
 
-### The Full Learning Flow
-
-```
-search_tree returns:
-  - chosen_token_id
-  - root (tree)
-  - meta_trajectory (every search decision + its logits + predicted Q)
-          |
-          v
-executor plays token in GTA
-          |
-          v
-rollout (per-frame rewards, states)
-          |
-          v
-trainer.train_step:
-          |
-          +-- compute_token_return(rollout) --> R_token
-          |
-          +-- backup_tree(root, R_token) --> update tree N/W/Q
-          |
-          +-- compute_metalevel_advantages(meta_trajectory, R_token)
-          |     --> advantages for every search step
-          |
-          +-- update_metapolicy(meta_mlp, meta_trajectory, advantages)
-                --> policy gradient over the full search trajectory
-```
+- `reward_mlp` loss: predicted `r_edge` vs actual `token_return` (MSE)
+- `rf_predictor` loss: predicted `rf_child` vs real `rf_child` from GTA (MSE)
 
 ## What Talks to What
 
 ```
-                     action_planner
-                          |
-                     top-k candidates
-                          |
-                          v
-  +----------------------------------------------------------+
-  |                    FRAME LOOP                             |
-  |                                                           |
-  |  per frame:                                               |
-  |                                                           |
-  |  executor.execution_frame()     search_tree.search_step() |
-  |       |                              |     |              |
-  |       +-> GTA (send controls)        |     +-> intuition  |
-  |       +-> env_reward_fn              |     +-> reward_fn  |
-  |       +-> record to rollout          |                    |
-  |                                      +-> metacontroller   |
-  |                                      +-> record to        |
-  |                                          meta_trajectory  |
-  |                                                           |
-  |  time_context refreshed every frame                       |
-  +----------------------------------------------------------+
-       |                            |
-       v                            v
-   rollout                     search_state
-   (per-frame rewards)         (meta_trajectory, root, chosen_token_id)
-       |                            |
-       +------------+---------------+
-                    |
-                    v
-                trainer
-                    |
-                    +-> compute_token_return (discounted sum + bootstrap)
-                    +-> backup_tree (update tree N/W/Q with real return)
-                    +-> compute_metalevel_advantages (credit every search step)
-                    +-> update_metapolicy (policy gradient on full trajectory)
+action_planner
+     |
+  top-k candidates [A, B, C]
+     |
+     v
++------------------------------------------------------------+
+|                    FRAME LOOP                              |
+|                                                            |
+|  per frame:                                                |
+|                                                            |
+|  executor.execution_frame()      search_tree.search_step() |
+|       |                               |                    |
+|       +-> GTA (send controls)         +-> intuition head   |
+|       +-> reward.compute_reward       +-> reward head NN   |
+|       +-> record to rollout           +-> action planner   |
+|                                       +-> metacontroller   |
+|                                       +-> meta_trajectory  |
+|                                                            |
+|  time_context refreshed every frame                        |
++------------------------------------------------------------+
+     |                             |
+     v                             v
+  rollout                    search_state
+  (rewards, states)          (meta_trajectory, root,
+                              best_path, best_path_value,
+                              chosen_token_id)
+     |                             |
+     +-------------+---------------+
+                   |
+                   v
+               trainer
+                   |
+                   +-> compute_token_return
+                   +-> backup_tree
+                   +-> compute_metalevel_advantages
+                   +-> update_metapolicy  (policy gradient)
+                   +-> train_reward_head  (MSE on r_edge + rf_predictor)
 ```
 
 ## Drift: Why INTERRUPT Exists
 
-When the metacontroller committed to a token earlier, the intuition head
-predicted what the world would look like (z_running).  But the real world
-keeps changing.  The drift is how wrong that prediction turned out to be:
+When the metacontroller committed to the current token, the intuition head
+predicted what the world would look like (`z_running`).  The real world keeps
+changing.
 
 ```
-drift = z_t (what actually happened) - z_running (what we predicted)
+drift = z_t - z_running
 
-small drift --> prediction was good, KEEP is fine
-large drift --> world changed unexpectedly, consider INTERRUPT
+small drift  →  prediction was good, no need to switch
+large drift  →  world changed unexpectedly, consider INTERRUPT
 ```
 
-The metacontroller sees this drift as part of its input and learns when
-a large drift means it should switch actions.
-
-## Parent Unexplored: Why ROLLBACK Exists
-
-The metacontroller also sees how many siblings at the current node are
-still unexplored:
-
-```
-parent_unexplored = 0.0   all siblings tried, ROLLBACK is pointless
-parent_unexplored = 0.66  2 out of 3 siblings still untried, ROLLBACK has options
-parent_unexplored = 1.0   nothing explored yet at this level
-```
-
-High parent_unexplored + bad Q-values at current node = ROLLBACK makes sense.
-Low parent_unexplored = already tried everything here, just commit the best.
+The metacontroller sees drift as the first feature and learns when a large
+drift means the current action is no longer appropriate.
