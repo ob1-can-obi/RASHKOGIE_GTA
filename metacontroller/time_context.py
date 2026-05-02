@@ -55,6 +55,14 @@ def time_context(
 
     elapsed_ratio = torch.tensor([[elapsed]], dtype=torch.float32, device=device)
 
+    # frames the metacontroller has left before the current token ends
+    # and it MUST have a decision ready
+    token_frames_left = max(0, token_duration_frames - frames_into_token)
+
+    token_frames_left_t = torch.tensor(
+        [[float(token_frames_left)]], dtype=torch.float32, device=device
+    )
+
     # -------------------------------------------------------------------------
     # Step 3: urgency from deadline proximity
     # -------------------------------------------------------------------------
@@ -79,9 +87,10 @@ def time_context(
     budget_ratio = torch.tensor([[budget_spent]], dtype=torch.float32, device=device)
 
     return {
-        "frames_left": frames_left,
-        "elapsed_ratio": elapsed_ratio,
-        "urgency": urgency,
+        "frames_left":      frames_left,
+        "elapsed_ratio":    elapsed_ratio,
+        "urgency":          urgency,
         "budget_remaining": budget_remaining,
-        "budget_ratio": budget_ratio,
+        "budget_ratio":     budget_ratio,
+        "token_frames_left": token_frames_left_t,  # raw frames left in current token
     }

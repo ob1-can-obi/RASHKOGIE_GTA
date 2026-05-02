@@ -1,155 +1,187 @@
 """
-Reward head.
+Reward head — neural network node evaluator for the search tree.
 
-This is not a trainable network right now. The reward method is a direct formula
-from reward_method.txt, calculated from the frame before an action and the frame
-after that action.
+Takes the parent embedding, the predicted child embedding, and the explicit
+reward-relevant signals for both states, then predicts r_edge for that
+transition.
+
+The signals that directly drive reward are kept explicit so the network
+does not have to discover them buried inside a 128-dim embedding:
+
+    rf = [wp_dist, hp, v_engine_hp, v_body_hp, road_dist, dead]   (RF_DIM = 6)
+
+For the parent node these come from the real GTA state.
+For the child node they are predicted by a small MLP (predict_reward_features).
+
+Both live here so the reward head and its feature predictor travel together.
 """
 
 import torch
+from torch import nn
 
 
-def reward_head(
-    previous_state,
-    current_state,
-    device="cpu",
-    distance_weight=0.1,
-    progress_weight=1.0,
-    step_penalty=0.01,
-    collision_weight=5.0,
-    offroad_weight=1.0,
-    goal_reward=20.0,
-    time_weight=0.1,
-    goal_radius_m=5.0,
-    offroad_start_m=8.0,
-    offroad_scale_m=10.0,
-    damage_threshold=1.0,
-    time_limit_s=0.0,
-    episode_start_ts=None,
-):
+RF_DIM = 6   # number of explicit reward-relevant features per state
+
+
+# =========================================================================
+# Feature extractor  (real GTA state -> reward feature tensor)
+# =========================================================================
+
+def extract_reward_features(gta_state, device="cpu"):
     """
-    Calculate the reward after one action.
+    Pull the reward-relevant signals out of a raw GTA state dict.
 
-    Input:
-    - previous_state: GTA frame before the action
-    - current_state: GTA frame after the action
-
-    Output:
-    - reward_tensor: shape [1, 1]
-    - components: plain numbers explaining where the reward came from
+    Output: shape [1, RF_DIM]
+        [wp_dist, hp, v_engine_hp, v_body_hp, road_dist, dead]
     """
-
-    # -------------------------------------------------------------------------
-    # Step 1: read distance-to-goal from the waypoint distance
-    # -------------------------------------------------------------------------
-
-    previous_distance = float(previous_state.get("wp_dist", 0.0) or 0.0)
-    current_distance = float(current_state.get("wp_dist", 0.0) or 0.0)
-
-    has_goal = previous_distance > 0.0 or current_distance > 0.0
-
-    if has_goal:
-        distance_term = -distance_weight * current_distance
-        progress = previous_distance - current_distance
-        progress_term = progress_weight * progress
-    else:
-        distance_term = 0.0
-        progress = 0.0
-        progress_term = 0.0
-
-    # -------------------------------------------------------------------------
-    # Step 2: detect collision severity from damage between frames
-    # -------------------------------------------------------------------------
-
-    previous_hp = float(previous_state.get("hp", 0.0) or 0.0)
-    current_hp = float(current_state.get("hp", 0.0) or 0.0)
-    previous_engine_hp = float(previous_state.get("v_engine_hp", 0.0) or 0.0)
-    current_engine_hp = float(current_state.get("v_engine_hp", 0.0) or 0.0)
-    previous_body_hp = float(previous_state.get("v_body_hp", 0.0) or 0.0)
-    current_body_hp = float(current_state.get("v_body_hp", 0.0) or 0.0)
-
-    player_damage = max(0.0, previous_hp - current_hp)
-    engine_damage = max(0.0, previous_engine_hp - current_engine_hp)
-    body_damage = max(0.0, previous_body_hp - current_body_hp)
-
-    damage_points = player_damage + engine_damage + body_damage
-    collision = 0.0
-    if damage_points > damage_threshold:
-        collision = min(1.0, damage_points / 100.0)
-    if bool(current_state.get("dead", False)):
-        collision = 1.0
-
-    collision_term = -collision_weight * collision
-
-    # -------------------------------------------------------------------------
-    # Step 3: estimate off-road severity from distance to nearest road center
-    # -------------------------------------------------------------------------
-
-    road_distance = float(current_state.get("road_dist", 0.0) or 0.0)
-    offroad = 0.0
-    if road_distance > offroad_start_m:
-        offroad = (road_distance - offroad_start_m) / max(0.001, offroad_scale_m)
-        offroad = max(0.0, min(1.0, offroad))
-
-    offroad_term = -offroad_weight * offroad
-
-    # -------------------------------------------------------------------------
-    # Step 4: give goal and remaining-time bonus only when goal is reached
-    # -------------------------------------------------------------------------
-
-    goal_reached = 0.0
-    if has_goal and current_distance <= goal_radius_m:
-        goal_reached = 1.0
-
-    time_remaining = 0.0
-    if goal_reached > 0.0 and time_limit_s > 0.0 and episode_start_ts is not None:
-        current_ts = float(current_state.get("ts", 0.0) or 0.0)
-        elapsed_s = max(0.0, (current_ts - float(episode_start_ts)) / 1000.0)
-        time_remaining = max(0.0, float(time_limit_s) - elapsed_s)
-
-    goal_term = goal_reward * goal_reached
-    time_term = time_weight * time_remaining * goal_reached
-
-    # -------------------------------------------------------------------------
-    # Step 5: add every term into one scalar reward
-    # -------------------------------------------------------------------------
-
-    step_term = -step_penalty
-
-    reward_value = (
-        distance_term
-        + progress_term
-        + step_term
-        + collision_term
-        + offroad_term
-        + goal_term
-        + time_term
-    )
-
-    reward_tensor = torch.tensor(
-        [[reward_value]],
+    return torch.tensor(
+        [[
+            float(gta_state.get("wp_dist",     0.0) or 0.0),
+            float(gta_state.get("hp",          0.0) or 0.0),
+            float(gta_state.get("v_engine_hp", 0.0) or 0.0),
+            float(gta_state.get("v_body_hp",   0.0) or 0.0),
+            float(gta_state.get("road_dist",   0.0) or 0.0),
+            float(bool(gta_state.get("dead",   False))),
+        ]],
         dtype=torch.float32,
         device=device,
     )
 
-    components = {
-        "reward": reward_value,
-        "distance": current_distance,
-        "previous_distance": previous_distance,
-        "progress": progress,
-        "distance_term": distance_term,
-        "progress_term": progress_term,
-        "step_term": step_term,
-        "collision": collision,
-        "collision_term": collision_term,
-        "offroad": offroad,
-        "road_dist": road_distance,
-        "offroad_term": offroad_term,
-        "goal_reached": goal_reached,
-        "goal_term": goal_term,
-        "time_remaining": time_remaining,
-        "time_term": time_term,
-    }
 
-    return reward_tensor, components
+# =========================================================================
+# Reward feature predictor  (predict child rf from parent embedding + delta)
+# =========================================================================
 
+def predict_reward_features(
+    z_parent,
+    delta_z,
+    rf_parent,
+    rf_predictor=None,
+    fused_dim=128,
+    hidden_dim=64,
+):
+    """
+    Predict what the reward-relevant features will look like at the child state.
+
+    The child state is only predicted (via the intuition head), so we cannot
+    read its raw GTA values.  This MLP estimates them from the parent features
+    and the embedding change.
+
+    Input:
+    - z_parent:     current node embedding,      shape [batch, fused_dim]
+    - delta_z:      z_child - z_parent,          shape [batch, fused_dim]
+    - rf_parent:    real reward features at parent, shape [batch, RF_DIM]
+    - rf_predictor: shared MLP weights (None = create fresh)
+
+    Output:
+    - rf_child:     predicted reward features,   shape [batch, RF_DIM]
+    - rf_predictor: updated MLP
+    """
+
+    # -------------------------------------------------------------------------
+    # Step 1: assemble input
+    # [z_parent | delta_z | rf_parent]  ->  [fused_dim*2 + RF_DIM]
+    # -------------------------------------------------------------------------
+
+    features  = torch.cat([z_parent, delta_z, rf_parent], dim=-1)
+    input_dim = fused_dim * 2 + RF_DIM
+
+    # -------------------------------------------------------------------------
+    # Step 2: create predictor MLP if not passed in
+    # -------------------------------------------------------------------------
+
+    if rf_predictor is None:
+        rf_predictor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, RF_DIM),
+        )
+
+    # -------------------------------------------------------------------------
+    # Step 3: predict child reward features
+    # -------------------------------------------------------------------------
+
+    rf_child = rf_predictor(features)   # [batch, RF_DIM]
+
+    return rf_child, rf_predictor
+
+
+# =========================================================================
+# Reward head  (scores a parent -> child transition)
+# =========================================================================
+
+def reward_head(
+    z_parent,
+    z_child,
+    rf_parent,
+    rf_child,
+    duration,
+    time_left,
+    reward_mlp=None,
+    fused_dim=128,
+    hidden_dim=128,
+):
+    """
+    Predict r_edge for one (parent -> child) transition.
+
+    Input:
+    - z_parent:   embedding at parent node,          shape [batch, fused_dim]
+    - z_child:    predicted embedding at child node, shape [batch, fused_dim]
+    - rf_parent:  reward features at parent,         shape [batch, RF_DIM]
+                  [wp_dist, hp, v_engine_hp, v_body_hp, road_dist, dead]
+    - rf_child:   predicted reward features at child, shape [batch, RF_DIM]
+    - duration:   token duration in frames,          shape [batch, 1]
+    - time_left:  frames remaining until deadline,   shape [batch, 1]
+    - reward_mlp: shared MLP weights (None = create fresh)
+
+    Output:
+    - r_edge:     predicted reward,   shape [batch, 1]
+    - reward_mlp: updated MLP
+    """
+
+    # -------------------------------------------------------------------------
+    # Step 1: embedding transition signal
+    # -------------------------------------------------------------------------
+
+    delta_z  = z_child  - z_parent    # [batch, fused_dim]
+
+    # -------------------------------------------------------------------------
+    # Step 2: explicit reward signal delta
+    # delta_rf makes progress (wp_dist change), damage, and off-road explicit
+    # -------------------------------------------------------------------------
+
+    delta_rf = rf_child - rf_parent   # [batch, RF_DIM]
+
+    # -------------------------------------------------------------------------
+    # Step 3: assemble full feature vector
+    #
+    # [z_parent | delta_z | rf_parent | delta_rf | duration | time_left]
+    #  128         128       6           6          1          1          = 270
+    # -------------------------------------------------------------------------
+
+    features  = torch.cat(
+        [z_parent, delta_z, rf_parent, delta_rf, duration, time_left],
+        dim=-1,
+    )
+    input_dim = fused_dim * 2 + RF_DIM * 2 + 2
+
+    # -------------------------------------------------------------------------
+    # Step 4: create reward MLP if not passed in
+    # -------------------------------------------------------------------------
+
+    if reward_mlp is None:
+        reward_mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    # -------------------------------------------------------------------------
+    # Step 5: predict r_edge
+    # -------------------------------------------------------------------------
+
+    r_edge = reward_mlp(features)     # [batch, 1]
+
+    return r_edge, reward_mlp

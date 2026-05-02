@@ -1,34 +1,37 @@
 {
-    "pipeline_run_id": null,
-    "stages": {
-        "encoder_intuition": {
-            "status": "pending",
-            "started_at": null,
-            "converged_at": null,
-            "final_metric": null,
-            "total_steps": null,
-            "checkpoint": null
-        },
-        "reward_head": {
-            "status": "pending",
-            "started_at": null,
-            "converged_at": null,
-            "final_metric": null,
-            "total_steps": null,
-            "checkpoint": null
-        },
-        "action_planner": {
-            "status": "pending",
-            "started_at": null,
-            "converged_at": null,
-            "final_metric": null,
-            "total_steps": null,
-            "checkpoint": null
-        },
-        "metacontroller": {
-            "status": "pending",
-            "depends_on_frozen": ["encoder_intuition", "reward_head"]
-        }
+  "pipeline_run_id": null,
+  "stages": {
+    "encoder_intuition": {
+      "status": "training",
+      "started_at": "2026-05-01T16:04:25.028154",
+      "converged_at": null,
+      "final_metric": null,
+      "total_steps": null,
+      "checkpoint": null
     },
-    "frozen_modules": []
+    "reward_head": {
+      "status": "pending",
+      "started_at": null,
+      "converged_at": null,
+      "final_metric": null,
+      "total_steps": null,
+      "checkpoint": null
+    },
+    "action_planner": {
+      "status": "pending",
+      "started_at": null,
+      "converged_at": null,
+      "final_metric": null,
+      "total_steps": null,
+      "checkpoint": null
+    },
+    "metacontroller": {
+      "status": "pending",
+      "depends_on_frozen": [
+        "encoder_intuition",
+        "reward_head"
+      ]
+    }
+  },
+  "frozen_modules": []
 }

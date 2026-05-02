@@ -1,154 +1,131 @@
 """
 Executor — plays a committed token in GTA one frame at a time.
 
-The executor is the token runner / GTA bridge.  It looks up the raw control
-chunk from the token table and exposes a per-frame interface so the frame
-loop can interleave execution with search.
+Responsibilities:
+1. Unmerge the committed (possibly BPE-merged) token into its base token sequence.
+2. Build a flat per-frame control schedule from those base tokens.
+3. Send each frame's controls to GTA via send_controls_fn.
+4. Read back the resulting GTA state via read_state_fn.
+5. Hand (prev_state, curr_state) to the reward module and record the result.
 
-It does NOT do any learning.  Learning happens in trainer.py.
+No learning happens here. Learning is trainer.py's job.
 """
 
-import sys
-from pathlib import Path
-
-REWARD_HEAD_DIR = Path(__file__).resolve().parent.parent / "reward_head"
-if str(REWARD_HEAD_DIR) not in sys.path:
-    sys.path.insert(0, str(REWARD_HEAD_DIR))
-
-from reward_head import reward_head
-
-
-def lookup_chunk(token_id, token_table):
-    """
-    Look up the raw control chunk and duration for a token.
-
-    Input:
-    - token_id: int, the committed token
-    - token_table: dict or lookup object mapping token_id -> chunk info
-      each entry has "controls" (raw control values) and "duration" (frames)
-
-    Output dict:
-    - controls: the raw control values for this token
-    - duration: int, how many frames this chunk lasts
-    """
-    entry = token_table[token_id]
-    return {
-        "controls": entry["controls"],
-        "duration": entry["duration"],
-    }
-
-
-def env_reward_fn(previous_state, current_state, device="cpu", **reward_kwargs):
-    """
-    Compute a single frame's environment reward from actual GTA state.
-
-    This is the hand-designed formula from reward_head.py applied to real
-    frames.  It is NOT a learned predictor — it is ground truth.
-
-    Input:
-    - previous_state: GTA frame dict before the frame
-    - current_state: GTA frame dict after the frame
-
-    Output:
-    - reward_value: float, the scalar reward for this frame transition
-    - components: dict, breakdown of reward terms
-    """
-    reward_tensor, components = reward_head(
-        previous_state,
-        current_state,
-        device=device,
-        **reward_kwargs,
-    )
-    return components["reward"], components
+from reward import compute_reward
 
 
 # =========================================================================
-# Execution state (carries rollout data between frames)
+# Token helpers
+# =========================================================================
+
+def build_control_schedule(token_id, token_table, unmerge_fn):
+    """
+    Unmerge a (possibly merged) token and flatten into a per-frame list.
+
+    Each base token in the token_table has:
+      "controls"  — the control values for that chunk (sent every frame)
+      "duration"  — how many frames the chunk lasts
+
+    Input:
+    - token_id:   int, the committed token (may be a merged BPE token)
+    - token_table: dict mapping token_id -> {"controls": ..., "duration": int}
+    - unmerge_fn: callable(token_id: int) -> list[int] of base token ids
+
+    Output:
+    - schedule: list of control dicts, one entry per frame
+    """
+    base_ids = unmerge_fn(token_id)
+    schedule = []
+    for base_id in base_ids:
+        entry    = token_table[base_id]
+        controls = entry["controls"]
+        duration = int(entry["duration"])
+        for _ in range(duration):
+            schedule.append(controls)
+    return schedule
+
+
+# =========================================================================
+# Execution state
 # =========================================================================
 
 class ExecutionState:
-    """Mutable state for a token being played, passed between frames."""
+    """Mutable per-token state passed between frames."""
 
-    def __init__(self, token_id, controls, duration):
+    def __init__(self, token_id, schedule):
         self.token_id = token_id
-        self.controls = controls
-        self.duration = duration
+        self.schedule  = schedule          # flat list of per-frame controls
+        self.duration  = len(schedule)
 
-        self.frame_idx = 0
-        self.states = []       # GTA states (length = duration + 1)
-        self.rewards = []      # per-frame rewards (length = duration)
-        self.components = []   # per-frame reward breakdowns
-        self.done = False
+        self.frame_idx  = 0
+        self.states     = []               # GTA states  (length = duration + 1)
+        self.rewards    = []               # per-frame reward floats
+        self.components = []               # per-frame reward breakdowns
+        self.done       = False
 
 
 # =========================================================================
 # Per-frame interface
 # =========================================================================
 
-def execution_init(token_id, token_table, read_state_fn):
+def execution_init(token_id, token_table, unmerge_fn, read_state_fn):
     """
-    Start executing a token.  Call once when switching to a new token.
+    Prepare to execute a token. Call once when switching to a new token.
 
-    Reads the initial GTA state and prepares the execution state.
+    Unmerges the token, builds the control schedule, and reads the initial
+    GTA state before the first frame plays.
 
     Input:
-    - token_id: int, the token to play
-    - token_table: token lookup (see lookup_chunk)
+    - token_id:    int
+    - token_table: token lookup (see build_control_schedule)
+    - unmerge_fn:  callable(int) -> list[int]
     - read_state_fn: callable() -> GTA state dict
 
     Output:
     - state: ExecutionState
     """
-    chunk = lookup_chunk(token_id, token_table)
-
-    state = ExecutionState(
-        token_id=token_id,
-        controls=chunk["controls"],
-        duration=chunk["duration"],
-    )
-
-    # read the state before we start playing
+    schedule = build_control_schedule(token_id, token_table, unmerge_fn)
+    state    = ExecutionState(token_id, schedule)
     state.states.append(read_state_fn())
-
     return state
 
 
 def execution_frame(state, send_controls_fn, read_state_fn, **reward_kwargs):
     """
-    Play one frame of the current token.  Call once per frame.
+    Play one frame of the current token.
 
-    Sends controls to GTA, reads the new state, computes the environment
-    reward for this frame transition.
+    Sends controls to GTA, reads back the new state, computes the reward
+    for this frame transition, and records everything.
 
     Input:
-    - state: ExecutionState from execution_init (or previous execution_frame)
+    - state:            ExecutionState
     - send_controls_fn: callable(controls) -> None
-    - read_state_fn: callable() -> GTA state dict
-    - reward_kwargs: forwarded to env_reward_fn
+    - read_state_fn:    callable() -> GTA state dict
+    - reward_kwargs:    forwarded to compute_reward (weights, thresholds, etc.)
 
     Output dict:
-    - reward: float, environment reward for this frame
+    - reward:    float
     - components: dict, reward breakdown
-    - done: bool, True if the token has finished all its frames
+    - done:      bool, True if all frames of the token have played
     - frame_idx: int, which frame just played (0-indexed)
     """
 
     if state.done:
         return {
-            "reward": 0.0,
+            "reward":     0.0,
             "components": {},
-            "done": True,
-            "frame_idx": state.frame_idx,
+            "done":       True,
+            "frame_idx":  state.frame_idx,
         }
 
-    # send controls to GTA
-    send_controls_fn(state.controls)
+    # send this frame's controls to GTA
+    send_controls_fn(state.schedule[state.frame_idx])
 
     # read what happened
     new_state = read_state_fn()
 
-    # compute environment reward for this frame
-    reward_value, comps = env_reward_fn(
+    # compute reward from the two raw states
+    reward_value, comps = compute_reward(
         state.states[-1],
         new_state,
         **reward_kwargs,
@@ -160,40 +137,36 @@ def execution_frame(state, send_controls_fn, read_state_fn, **reward_kwargs):
     state.components.append(comps)
     state.frame_idx += 1
 
-    # check if token is finished
     if state.frame_idx >= state.duration:
         state.done = True
 
     return {
-        "reward": reward_value,
+        "reward":     reward_value,
         "components": comps,
-        "done": state.done,
-        "frame_idx": state.frame_idx - 1,
+        "done":       state.done,
+        "frame_idx":  state.frame_idx - 1,
     }
 
 
 def get_rollout(state):
     """
-    Extract the rollout summary from a finished execution.
-
-    Input:
-    - state: ExecutionState (should be done)
+    Package the rollout after a token finishes.
 
     Output dict:
-    - token_id: int
-    - duration: int, frames played
-    - states: list of GTA state dicts
-    - rewards: list of per-frame reward floats
-    - components: list of per-frame reward breakdowns
+    - token_id:    int
+    - duration:    int, frames actually played
+    - states:      list of GTA state dicts
+    - rewards:     list of per-frame reward floats
+    - components:  list of per-frame reward breakdowns
     - state_before: first GTA state
-    - state_after: last GTA state
+    - state_after:  last GTA state
     """
     return {
-        "token_id": state.token_id,
-        "duration": state.frame_idx,
-        "states": state.states,
-        "rewards": state.rewards,
-        "components": state.components,
+        "token_id":    state.token_id,
+        "duration":    state.frame_idx,
+        "states":      state.states,
+        "rewards":     state.rewards,
+        "components":  state.components,
         "state_before": state.states[0],
-        "state_after": state.states[-1] if len(state.states) > 1 else state.states[0],
+        "state_after":  state.states[-1] if len(state.states) > 1 else state.states[0],
     }
