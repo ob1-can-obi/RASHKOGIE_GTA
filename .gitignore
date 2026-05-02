@@ -27,3 +27,5 @@ logs/
 
 # Claude
 .claude/
+.planning/
+dashboard/frontend/node_modules/

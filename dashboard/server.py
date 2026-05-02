@@ -29,6 +29,10 @@ from dashboard.ws_manager import WSManager
 from dashboard.collector import JSONLCollector
 from dashboard.routes.metrics import metrics_router
 from dashboard.routes.params import params_router
+from dashboard.routes.sessions import sessions_router
+from dashboard.routes.checkpoints import checkpoints_router
+from dashboard.routes.embeddings import embeddings_router
+from dashboard.routes.predictions import predictions_router
 
 _log = logging.getLogger("dashboard")
 _DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -73,7 +77,10 @@ app.add_middleware(PasswordAuthMiddleware)
 # REST routes
 app.include_router(metrics_router, prefix="/api")
 app.include_router(params_router, prefix="/api")
-# Sessions, checkpoints, embeddings, predictions routes added in Plan 04
+app.include_router(sessions_router, prefix="/api")
+app.include_router(checkpoints_router, prefix="/api")
+app.include_router(embeddings_router, prefix="/api")
+app.include_router(predictions_router, prefix="/api")
 
 
 # Health check endpoint (no auth needed -- excluded in PasswordAuthMiddleware)
