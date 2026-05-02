@@ -9,6 +9,7 @@ const routes = [
   { path: '/embeddings', name: 'Embeddings', component: () => import('./views/EmbeddingsView.vue') },
   { path: '/predictions', name: 'Predictions', component: () => import('./views/PredictionsView.vue') },
   { path: '/weights', name: 'Weights', component: () => import('./views/WeightsView.vue') },
+  { path: '/help', name: 'Help', component: () => import('./views/HelpView.vue') },
 ]
 
 export default createRouter({ history: createWebHistory(), routes })

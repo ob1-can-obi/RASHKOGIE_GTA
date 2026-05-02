@@ -1,179 +1,391 @@
-ego + entities + scene + route + time/deadline context
-                        │
-                        ▼
-                ┌───────────────────────┐
-                │  ENCODERS + ATTENTION │
-                │-----------------------│
-                │ ego encoder           │
-                │ entity encoder        │
-                │ scene encoder         │
-                │ route encoder         │
-                │ time encoder          │
-                └───────────┬───────────┘
-                            │
-                            ▼
-                 current fused embedding z_t
-                            │
-        ┌───────────────────┴───────────────────┐
-        │                                       │
-        ▼                                       ▼
-┌───────────────────────┐           ┌──────────────────────────┐
-│  ACTION PLANNER       │           │  EXTERNAL TIME CONTROL   │
-│-----------------------│           │--------------------------│
-│ planner(z_t)          │           │ current_time = τ_ext     │
-│ -> top-k action tokens│           │ deadline     = T_goal    │
-│ -> token ids          │           │ time_left    = ΔT_t      │
-│ -> token scores       │           │ urgency      = u_t       │
-│ -> token durations    │           │ search budget B_t        │
-│                       │           │ max depth D_t            │
-│ output:               │           │ think-cost λ_t           │
-│ top-k candidates      │           │ commit threshold θ_t     │
-└───────────┬───────────┘           └───────────┬──────────────┘
-            │                                   │
-            └─────────────────┬─────────────────┘
-                              ▼
-                  ┌─────────────────────────────┐
-                  │   FRAME-LOCAL SEARCH TREE   │
-                  │-----------------------------│
-                  │ root = (z_t, depth=0, B_t,  │
-                  │         D_t)                │
-                  │                             │
-                  │ each node stores:           │
-                  │ - z_n                       │
-                  │ - candidate tokens          │
-                  │ - opened children           │
-                  │ - next unopened index       │
-                  │ - child states z_child      │
-                  │ - r_edge                    │
-                  │ - N, W, Q, depth           │
-                  │ - parent pointer            │
-                  │ - risk / route summaries    │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                     for each candidate token_j
-                                │
-                                ▼
-                  ┌─────────────────────────────┐
-                  │       INTUITION HEAD        │
-                  │-----------------------------│
-                  │ intuition(z_n, token_j,     │
-                  │           duration_j)       │
-                  │ -> predicted future state   │
-                  │    z_child                  │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                  ┌─────────────────────────────┐
-                  │   REWARD / NODE EVALUATOR   │
-                  │-----------------------------│
-                  │ reward_fn(z_n, z_child,     │
-                  │           duration_j,       │
-                  │           time_left)        │
-                  │ -> r_edge                   │
-                  │                             │
-                  │ example terms:              │
-                  │ - distance penalty          │
-                  │ + progress reward           │
-                  │ - step penalty              │
-                  │ - collision penalty         │
-                  │ - offroad penalty           │
-                  │ + goal bonus                │
-                  │ + early-finish bonus        │
-                  │ - think cost                │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                  child node gets:
-                  - child.z      = z_child
-                  - child.r_edge = r_edge
-                  - child.token  = token_j
+================================================================================
+                        RASHKOGIE GTA - ARCHITECTURE DIAGRAM
+================================================================================
 
-                                │
-                                ▼
-                  ┌─────────────────────────────┐
-                  │       METACONTROLLER        │
-                  │-----------------------------│
-                  │ input:                      │
-                  │ - latest real z_t          │
-                  │ - current running token    │
-                  │ - token total duration     │
-                  │ - token remaining duration │
-                  │ - elapsed ratio            │
-                  │ - tree root                │
-                  │ - child Q / priors / reward│
-                  │ - urgency / time left      │
-                  │                             │
-                  │ output:                     │
-                  │ - KEEP                      │
-                  │ - INTERRUPT                 │
-                  │ - COMMIT_NEXT               │
-                  │ - selected token id         │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                  ┌─────────────────────────────┐
-                  │   OUTER EXECUTION CODE      │
-                  │-----------------------------│
-                  │ latest committed output     │
-                  │ takes precedence            │
-                  │ execute chosen token        │
-                  │ frame by frame              │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                              GTA
-                                │
-                                ▼
-                       reward / next frame
-                                │
-                                ▼
-                    updated real state -> z_t
+An AI system that learns to play GTA V by watching you play, then improves
+via Monte Carlo Tree Search during live gameplay.
 
-Penalties can be: Cost of delay + cost of thinking. Each "think more" will increase the cost.
 
-Macro actions can be a final tensor with the values of the inputs or the inputs that need to be activated.
+================================================================================
+1. HIGH-LEVEL PIPELINE
+================================================================================
 
-EPISODE LOOP: repeat until GTA episode ends
-│
-├── get current GTA observation o_t
-│
-├── FRAME LOOP (one planning cycle for one GTA frame)
-│   │
-│   ├── encode observation
-│   │      ego + entities + scene + route
-│   │                ↓
-│   │        encoders + attention
-│   │                ↓
-│   │           fused embedding z_t
-│   │
-│   ├── planner proposes root candidates
-│   │      planner(z_t) -> top-k macro-actions + soft priors
-│   │
-│   ├── initialize frame-local search tree T_t
-│   │      root.z = z_t
-│   │      root.candidate_list = planner output
-│   │      root.next_unopened_index = 0
-│   │      root.children = []
-│   │
-│   ├── open first root candidate
-│   │      OPEN_NEXT_HERE(root)
-│   │
-│   ├── ROOT SEARCH LOOP
-│   │      repeat until root says COMMIT
-│   │      or search budget exhausted
-│   │
-│   │      └── call NODE LOOP on root
-│   │
-│   ├── chosen root macro-action
-│   │          ↓
-│   │    Action / Control Head
-│   │    action_head(z_t, chosen_macro_action)
-│   │          ↓
-│   │   steer / throttle / brake
-│   │
-│   ├── execute controls in GTA
-│   │
-│   └── receive next observation + reward
-│
-└── continue to next frame
+  +-----------+      +------------+      +-----------+      +------------+
+  |  CAPTURE  | ---> | TOKENIZE   | ---> |   TRAIN   | ---> |  MONITOR   |
+  | (you play)|      | (BPE vocab)|      | (4 stages)|      | (dashboard)|
+  +-----------+      +------------+      +-----------+      +------------+
+       |                                       |                    |
+       v                                       v                    v
+  JSONL files              Frozen modules feed downstream     Real-time charts
+  (state + controls)       stages in strict order            + param hot-reload
+
+
+================================================================================
+2. NEURAL NETWORK MODULES
+================================================================================
+
+  +------------------+    +------------------+    +------------------+
+  |   MAIN MODEL     |    | INTUITION HEAD   |    |   REWARD HEAD    |
+  |  (Encoder)       |    | (Forward Model)  |    | (Transition NN)  |
+  |                  |    |                  |    |                  |
+  | ego[46]  -----+  |    | z_t + token      |    | z_parent, z_child|
+  | scene[16] ----|  |    |      |           |    | rf_parent/child  |
+  | route[14] ----|  |    |      v           |    | duration, t_left |
+  | entities[32x24]  |    | z_next_pred[128] |    |      |           |
+  |      |           |    +------------------+    |      v           |
+  |      v           |                            | r_edge (scalar)  |
+  | z_t [128-dim]    |                            +------------------+
+  +------------------+
+           |
+           v
+  +------------------+    +------------------+
+  | ACTION PLANNER   |    | METACONTROLLER   |
+  | (Imitation)      |    | (MCTS Policy)    |
+  |                  |    |                  |
+  | z_t + prev_token |    | z_t + time_ctx   |
+  |      |           |    | + search_state   |
+  |      v           |    |      |           |
+  | top-k token IDs  |    |      v           |
+  | (logits)         |    | EXPLORE          |
+  +------------------+    | ROLLBACK         |
+                          | COMMIT_NEXT      |
+                          | INTERRUPT        |
+                          +------------------+
+
+
+================================================================================
+3. TRAINING PIPELINE (Strict Sequential Stages)
+================================================================================
+
+  Stage 1: encoder_intuition        Stage 2: reward_head
+  +--------------------------+      +--------------------------+
+  | Trains: encoder +        |      | Trains: reward MLP       |
+  |         intuition head   |      | Data: state pairs ->     |
+  | Data: state_t -> state_t+1      |        realized return   |
+  | Loss: MSE < 0.05        |      | Loss: MSE < 0.1         |
+  | FREEZES after converge   | ---> | FREEZES after converge   |
+  +--------------------------+      +--------------------------+
+                                              |
+                                              v
+  Stage 3: action_planner           Stage 4: metacontroller
+  +--------------------------+      +--------------------------+
+  | Trains: planner MLP      |      | Trains: MCTS policy      |
+  | Data: (z_t, prev) ->    |      | Data: live gameplay +    |
+  |       player's token     |      |       search decisions   |
+  | Loss: CE, acc > 60%     |      | Loss: REINFORCE (PG)     |
+  | Depends: stages 1-2     | ---> | Depends: stages 1-2      |
+  +--------------------------+      +--------------------------+
+
+  Orchestrator: coordinator.py
+  Config:       training_config.json
+  Status:       training_status.json
+
+
+================================================================================
+4. DATA CAPTURE (GTA V -> Training Data)
+================================================================================
+
+  +----------------+       Named Pipe            +-------------------+
+  | GTA V + C#     | ----------------------->   | game_state_reader  |
+  | SHVDN Script   |   \\.\pipe\GTA5State       | (Python)           |
+  | (20 Hz sample) |                            +-------------------+
+  +----------------+                                     |
+                                                         v
+                                              +-------------------+
+                                              | capture_states.py |
+                                              | capture_demos.py  |
+                                              +-------------------+
+                                                         |
+                     +-----------------------------------+-------------------+
+                     |                                   |                   |
+                     v                                   v                   v
+          main_model/training_data/     reward_head/training_data/  action_planner/
+           session_*.jsonl               session_*.jsonl           training_data/
+                                                                   session_*.jsonl
+
+
+================================================================================
+5. TOKENIZER (BPE Control Vocabulary)
+================================================================================
+
+  Raw controls per frame:
+    u_steer (-1..1), u_throttle (0..1), u_brake (0..1)
+           |
+           v
+  Quantize: 8 bins per axis (0-7)
+           |
+           v
+  BPE merge frequent adjacent pairs
+           |
+           v
+  ~870 tokens in lookup table
+    token_id -> { control_chunk, frame_count, duration }
+           |
+           v
+  tokenizer_lookup.json (JSON, no learned embeddings)
+
+
+================================================================================
+6. MCTS FRAME LOOP (Live Agent in GTA)
+================================================================================
+
+  metacontroller/frame_loop.py
+
+  +---------------------------------------------------------------------+
+  |  While current token is playing (~20 frames per token):             |
+  |                                                                     |
+  |  Each Frame:                                                        |
+  |    1. executor_frame()                                              |
+  |       - Send 1 control frame to GTA (named pipe)                   |
+  |       - Read game state                                            |
+  |       - Encode -> z_t                                              |
+  |       - Compute realized reward (ground-truth formula)             |
+  |                                                                     |
+  |    2. search_step()                                                 |
+  |       - MCTS picks ONE decision:                                   |
+  |         EXPLORE   -> expand child, descend                         |
+  |         ROLLBACK  -> go back to parent, try sibling                |
+  |         COMMIT    -> lock in best_path[0], stop search             |
+  |         INTERRUPT -> abort token NOW, execute best immediately     |
+  |                                                                     |
+  |    3. metacontroller MLP                                            |
+  |       - Input: time_context + search_state                         |
+  |       - Output: action logits -> sample decision                   |
+  |                                                                     |
+  |  When token ends:                                                   |
+  |    - next_token = search_tree.best_path[0] (or planner fallback)   |
+  |    - trainer.train_step(realized_returns, decisions)                |
+  |    - Emit metrics to JSONL                                         |
+  +---------------------------------------------------------------------+
+
+
+================================================================================
+7. DASHBOARD ARCHITECTURE (Monitoring + Control)
+================================================================================
+
+  +------------------+         JSONL files         +------------------+
+  | Training Scripts | -------------------------> | JSONLCollector    |
+  | (write metrics)  |         (poll 1.5s)        | (background task)|
+  +------------------+                            +------------------+
+         ^                                                 |
+         |  WebSocket /ws/train                            v
+         |  (receive param updates)              +------------------+
+         |                                       | SQLite           |
+         |                                       | (training.db)    |
+         |                                       |  - sessions      |
+  +------+----------+                            |  - metrics       |
+  | Dashboard Server |<--------------------------|  - decisions     |
+  | (FastAPI)        |                           |  - embeddings    |
+  |                  |                           |  - predictions   |
+  |  REST API:       |                           +------------------+
+  |  /api/metrics    |
+  |  /api/params     |         WebSocket /ws/browser
+  |  /api/sessions   | <-----------------------------+
+  |  /api/checkpoints|                               |
+  |  /api/embeddings |                               |
+  |  /api/predictions|                               |
+  +------------------+                               |
+                                                     |
+                                            +--------+--------+
+                                            | Vue 3 SPA       |
+                                            | (Browser)       |
+                                            |                 |
+                                            | Views:          |
+                                            |  - Metrics      |
+                                            |  - Decisions    |
+                                            |  - Hyperparams  |
+                                            |  - Sessions     |
+                                            |  - Embeddings   |
+                                            |  - Predictions  |
+                                            |  - Weights      |
+                                            |  - Help         |
+                                            +-----------------+
+
+  Feedback Loop:
+    Browser -> PUT /api/params -> training_config.json -> broadcast /ws/train
+    Training script reloads config on next step (hot-reload)
+
+
+================================================================================
+8. DIRECTORY STRUCTURE
+================================================================================
+
+  RASHKOGIE_GTA/
+  |
+  |-- gta_stream/               GTA V state reader + control sender
+  |   |-- GTA5_StateStreamer.cs    C# in-game script (SHVDN)
+  |   |-- game_state_reader.py     Named pipe reader
+  |   |-- game_control.py          Control sender
+  |   +-- gta_ws_bridge.py         WebSocket bridge
+  |
+  |-- main_model/               Encoder network -> z_t [128]
+  |   |-- main_model.py           Architecture (ego/scene/route/entity fusion)
+  |   |-- train.py                Training script
+  |   |-- training_data/          JSONL session files
+  |   +-- checkpoints/            .pt model saves
+  |
+  |-- intuition_head/           Forward model (predicts z_next)
+  |   |-- intuition_head.py       Architecture
+  |   +-- train.py                Trained jointly with encoder
+  |
+  |-- reward_head/              Transition scorer (r_edge)
+  |   |-- reward_head.py          Architecture
+  |   |-- train.py                Training script
+  |   |-- training_data/          JSONL session files
+  |   +-- checkpoints/            .pt model saves
+  |
+  |-- action_planner/           Token proposal (imitation learning)
+  |   |-- action_planner.py       Architecture
+  |   |-- train.py                Training script
+  |   |-- training_data/          JSONL session files
+  |   +-- checkpoints/            .pt model saves
+  |
+  |-- metacontroller/           MCTS search + live agent
+  |   |-- frame_loop.py           Main driver
+  |   |-- search_tree.py          MCTS tree
+  |   |-- executor.py             Per-frame token runner
+  |   |-- trainer.py              Policy gradient updates
+  |   |-- reward.py               Ground-truth reward formula
+  |   +-- time_context.py         Urgency signals
+  |
+  |-- tokenizer/                BPE control tokenizer
+  |   |-- tokenizer.py            Build + encode/decode
+  |   +-- chunk_lookup.py         Load token chunks
+  |
+  |-- dashboard/                Monitoring + control UI
+  |   |-- server.py               FastAPI app entry
+  |   |-- database.py             SQLite schema + queries
+  |   |-- collector.py            JSONL -> SQLite poller
+  |   |-- ws_manager.py           Dual WebSocket pools
+  |   |-- auth.py                 Optional bearer token auth
+  |   +-- frontend/               Vue 3 SPA (Vite build)
+  |       |-- src/views/          7 views + Help
+  |       |-- src/components/     Charts, sidebar, cards
+  |       |-- src/stores/         Pinia state management
+  |       +-- dist/               Built output (served by FastAPI)
+  |
+  |-- tests/                    Unit + integration tests
+  |-- coordinator.py            Pipeline orchestrator CLI
+  |-- training_config.json      Hyperparameters (hot-reloadable)
+  |-- training_status.json      Pipeline state tracking
+  |-- capture_states.py         State sequence recorder
+  +-- capture_demos.py          Player demo recorder
+
+
+================================================================================
+9. COMPLETE DATA FLOW (End to End)
+================================================================================
+
+  YOU PLAY GTA V
+       |
+       | C# script samples at 20 Hz
+       v
+  Named Pipe -> game_state_reader.py -> raw state dict (100+ fields)
+       |
+       | capture_states.py records
+       v
+  JSONL files (training data per module)
+       |
+       | tokenizer.py builds BPE vocabulary
+       v
+  ~870 tokens (lookup table, no learned embeddings)
+       |
+       | coordinator.py orchestrates 4 stages
+       v
+  Stage 1: Encoder + Intuition -> z_t [128] (FREEZE)
+       |
+       v
+  Stage 2: Reward Head -> r_edge scoring (FREEZE)
+       |
+       v
+  Stage 3: Action Planner -> top-k token proposals
+       |
+       v
+  Stage 4: Metacontroller (MCTS) -> live GTA agent
+       |                                    |
+       | Writes metrics JSONL               | Sends controls to GTA
+       v                                    v
+  Dashboard collector polls         GTA responds with new states
+       |                                    |
+       v                                    v
+  SQLite + WebSocket broadcast      Agent improves via REINFORCE
+       |
+       v
+  Browser shows real-time charts
+  User can hot-reload hyperparams -> fed back to training
+
+
+================================================================================
+10. KEY DESIGN DECISIONS
+================================================================================
+
+  - Shared z_t [128]: One embedding used by ALL downstream modules
+  - Strict stage ordering: Each stage freezes before next begins
+  - Lookup-table tokenizer: No learned embeddings, just BPE over controls
+  - Per-frame MCTS: One search decision per GTA frame (not per token)
+  - Ground-truth reward formula: Separate from learned reward_head
+  - JSONL streaming: Training writes metrics; dashboard polls + ingests
+  - Hot-reload params: Browser edits config, training picks up next step
+  - Dual WebSocket: Browser clients + training clients on separate pools
+  - SQLite WAL mode: Concurrent reads during collector writes
+
+
+================================================================================
+11. ENCODER DETAIL (main_model.py)
+================================================================================
+
+  Ego State [46]         Scene State [16]         Route [14]
+       |                      |                      |
+       v                      v                      v
+  ego_mlp [64]         scene_mlp [64]         route_mlp [64]
+       |                      |                      |
+       v                      v                      v
+  ego_emb [64]         scene_emb [64]         route_emb [64]
+       \_____________________ | _____________________/
+                              |
+                              v
+          Entity List [32 x 24] -> entity_mlp [64] each
+                              |
+                              v
+          Multi-Head Attention (Query: [ego|scene|route], KV: entities)
+                              |
+                              v
+                     entity_context [64]
+                              |
+                              v
+  [ego_emb | scene_emb | route_emb | entity_context] -> fusion_mlp
+                              |
+                              v
+                         z_t [128]
+
+
+================================================================================
+12. SEARCH TREE EXPANSION (per node)
+================================================================================
+
+  Parent node (z_parent)
+       |
+       | For each candidate token_j:
+       v
+  +------------------------------------------+
+  | 1. Intuition Head rolls token:           |
+  |    merged_token_500 -> unmerge ->        |
+  |    [base_12, base_7, base_3]             |
+  |    z_parent -> z_1 -> z_2 -> z_3        |
+  |    = z_child                             |
+  |                                          |
+  | 2. Reward Head scores transition:        |
+  |    reward_head(z_parent, z_child,        |
+  |      rf_parent, rf_child, duration,      |
+  |      time_left) -> r_edge               |
+  |                                          |
+  | 3. Action Planner populates child:       |
+  |    action_planner(z_child, prev_token)   |
+  |    -> [token_A, token_B, token_C]       |
+  +------------------------------------------+
+       |
+       v
+  Child node: { z_child, r_edge, candidates, N=0, W=0, Q=0 }
+
+
+================================================================================

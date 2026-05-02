@@ -1,0 +1,502 @@
+================================================================================
+                     RASHKOGIE GTA - TRAINING PLAN & COMMANDS
+================================================================================
+
+This document walks you through the full training pipeline from scratch:
+capturing gameplay data, building the tokenizer, training all 4 stages,
+and monitoring everything via the dashboard.
+
+
+================================================================================
+PREREQUISITES
+================================================================================
+
+  - Python 3.10+ with PyTorch installed
+  - GTA V with SHVDN (Script Hook V .NET) and the GTA5_StateStreamer.cs mod
+  - Named pipe communication working (Windows for GTA, can train on Mac/Linux
+    from captured JSONL files)
+  - Node.js 18+ (for dashboard frontend build)
+
+
+================================================================================
+PHASE 0: INITIALIZE THE PIPELINE
+================================================================================
+
+  # Initialize a fresh pipeline run (resets all stages to "pending")
+  python coordinator.py init
+
+  # Check status at any time
+  python coordinator.py status
+
+  # See what to do next
+  python coordinator.py next
+
+  # Start the dashboard (separate terminal, keep open for all stages):
+  python -m dashboard.server --host 0.0.0.0 --port 8000
+  # Open http://localhost:8000 in browser
+
+  DASHBOARD AT THIS STAGE:
+    - Bottom-left shows "Live" (green dot) = server connected
+    - No data yet — views will say "No training data"
+    - Leave browser open; it auto-reconnects if server restarts
+
+
+================================================================================
+PHASE 1: DATA CAPTURE (Play GTA V)
+================================================================================
+
+You need gameplay data before any training can happen. There are two types of
+capture sessions you'll run:
+
+  A) STATE CAPTURE (for encoder + intuition + reward head)
+  ─────────────────────────────────────────────────────────
+  Records state_t -> state_t+1 pairs and reward transitions.
+
+    # Start GTA V with the SHVDN mod loaded
+    # Then run the state capture (reads from named pipe):
+    python capture_states.py
+
+    # Drive around for 15-30 minutes per session
+    # Ctrl+C to stop. Files saved to:
+    #   main_model/training_data/session_YYYYMMDD_HHMMSS.jsonl
+    #   reward_head/training_data/session_YYYYMMDD_HHMMSS.jsonl
+
+  B) DEMO CAPTURE (for action planner imitation learning)
+  ────────────────────────────────────────────────────────
+  Records your raw controls (steer, throttle, brake) per frame.
+
+    python capture_demos.py
+
+    # Drive naturally - the model learns to imitate YOU
+    # Ctrl+C to stop. Files saved to:
+    #   action_planner/training_data/session_YYYYMMDD_HHMMSS.jsonl
+
+  HOW MUCH DATA DO YOU NEED?
+  ──────────────────────────
+  There is no magic number. The right amount depends on how well your models
+  converge. Start capturing, start training, and let the dashboard tell you
+  when you need more.
+
+  ROUGH STARTING POINTS (expect to capture more as you go):
+
+  For Encoder + Intuition (capture_states.py):
+    - Needs diverse state transitions — highway, city, intersections, traffic
+    - Minimum to attempt training: ~2 hours of varied driving (8+ sessions)
+    - For good convergence: 5-10+ hours across many scenarios
+    - The encoder must see DIFFERENT situations to learn structure.
+      If you only drive highways, it won't generalize to city streets.
+
+  For Reward Head (also capture_states.py):
+    - Needs both GOOD transitions (smooth driving) and BAD ones (crashes,
+      off-road, collisions) so it learns to distinguish them
+    - Drive badly on purpose sometimes — crash into things, go off-road
+    - Same data as encoder, but quality matters: include failures
+
+  For Action Planner (capture_demos.py):
+    - This is the hungriest stage. You're teaching a model to predict YOUR
+      specific token choice from ~870 possible tokens.
+    - Minimum to attempt: 3-5 hours of consistent, clean driving
+    - For 60%+ accuracy: likely 10-20+ hours of demonstrations
+    - CONSISTENCY matters: if you drive erratically or inconsistently,
+      the model can't learn a clear pattern from you
+    - Tip: focus sessions on one driving style (e.g., careful city driving)
+      rather than mixing everything randomly
+
+  For Metacontroller (learns live, no pre-capture needed):
+    - Trains from its own gameplay during Stage 4
+    - More hours of live play = better search policy
+    - Expect 10-50+ hours of agent playtime for solid performance
+
+  THE REAL ANSWER:
+    Start with what you have. Train. Watch the dashboard:
+    - If loss plateaus well above the threshold → you need more data
+    - If accuracy is stuck low → your demos may be inconsistent, or too few
+    - If embeddings are one blob → encoder needs more diverse scenarios
+    Capture more, retrain, repeat. This is an iterative process.
+
+  DASHBOARD AT THIS STAGE:
+    - Sessions View: new sessions appear as you capture
+    - No training metrics yet (those come in later phases)
+
+
+================================================================================
+PHASE 2: BUILD TOKENIZER (BPE Vocabulary)
+================================================================================
+
+After you have demo captures, build the control tokenizer:
+
+  # Step 1: Capture raw controls (if you haven't already via capture_demos.py)
+  python tokenizer/tokenizer.py capture
+
+  # Step 2: Build the BPE lookup table from captured controls
+  python tokenizer/tokenizer.py build
+
+  # This creates tokenizer_lookup.json with ~870 tokens
+  # Each token maps to a control chunk (multi-frame action sequence)
+
+  # Verify the vocabulary was built:
+  ls tokenizer/tokenizer_lookup.json
+
+  DASHBOARD AT THIS STAGE:
+    - Nothing new on dashboard — tokenization is offline/local
+    - Proceed to Stage 1 training
+
+
+================================================================================
+PHASE 3: TRAIN STAGE 1 - ENCODER + INTUITION HEAD
+================================================================================
+
+This is the foundation. Trains the encoder (raw state -> z_t [128]) and the
+intuition head (z_t + token -> z_next predicted).
+
+  # Start training
+  python main_model/train.py
+
+  # What's happening:
+  #   - Reads state pairs from main_model/training_data/*.jsonl
+  #   - Trains encoder to compress 100+ state fields into z_t [128]
+  #   - Trains intuition head to predict next state from current + action
+  #   - Convergence target: MSE < 0.05 (patience: 10 eval cycles)
+  #
+  # Config (editable in training_config.json or dashboard):
+  #   lr: 3e-4
+  #   batch_size: 8
+  #   eval_every_n_steps: 100
+  #   convergence: MSE < 0.05, patience 10
+
+  DASHBOARD AT THIS STAGE:
+    - Metrics View: select "encoder_intuition" in the module selector (top-right)
+      - Loss curve should trend downward toward 0.05
+      - Spikes are normal early on; sustained increase = problem
+    - Embeddings View: watch z_t representations form clusters
+      - "Step coloring": see how embeddings evolve over time
+      - "Context coloring": see if highway/city/combat separate
+      - One blob = model not learning structure yet
+      - Clear clusters = encoder is working
+      - If embeddings collapse to a single point: lr is too high
+    - Predictions View: intuition head accuracy
+      - Scatter plot: points on the diagonal = perfect predictions
+      - Points above/below diagonal = systematic bias to fix
+      - MSE trend should decrease; plateau = needs more data
+    - Hyperparams View: tune if loss is stuck
+      - If loss spikes: lower lr (try 1e-4)
+      - If loss barely moves: raise lr (try 5e-4) or increase batch_size
+      - Click Apply — takes effect on next training step, no restart
+    - Weights View: checkpoints being saved
+      - Note the best checkpoint before making param changes
+      - If you break things, restore a previous checkpoint here
+
+  # When converged, the script will print "CONVERGED" and exit
+  # Mark as converged if needed:
+  python coordinator.py update encoder_intuition converged --metric 0.045
+
+  # FREEZE the encoder (required before Stage 2 can start):
+  python coordinator.py freeze encoder_intuition
+
+  # Verify:
+  python coordinator.py status
+  # Should show: encoder_intuition = converged, frozen_modules = encoder, intuition_head, token_embed
+
+
+================================================================================
+PHASE 4: TRAIN STAGE 2 - REWARD HEAD
+================================================================================
+
+Trains the reward head to score state transitions (is this a good or bad move?).
+Depends on frozen encoder from Stage 1.
+
+  # Start training
+  python reward_head/train.py
+
+  # What's happening:
+  #   - Reads reward pairs from reward_head/training_data/*.jsonl
+  #   - Learns to predict realized return from (z_parent, z_child, duration)
+  #   - Uses FROZEN encoder to produce embeddings (no gradient flows back)
+  #   - Convergence target: MSE < 0.1 (patience: 10 eval cycles)
+  #
+  # Config:
+  #   lr: 3e-4
+  #   batch_size: 8
+  #   convergence: MSE < 0.1, patience 10
+
+  DASHBOARD AT THIS STAGE:
+    - Metrics View: select "reward_head" in the module selector
+      - Loss curve should drop toward 0.1
+      - This stage usually converges faster than Stage 1
+    - Predictions View: reward prediction accuracy
+      - Scatter: predicted reward vs actual realized return
+      - Tight cluster on diagonal = reward head is accurate
+      - Spread = uncertainty (normal early, should tighten)
+    - Hyperparams View: same workflow as Stage 1
+      - If loss is stuck at ~0.15: try lowering lr to 1e-4
+      - If loss oscillates wildly: increase batch_size to 16
+    - Sessions View: compare this run vs previous attempts
+      - Select two sessions to overlay their curves
+      - Steeper initial slope = better hyperparams
+
+  # When converged:
+  python coordinator.py update reward_head converged --metric 0.08
+  python coordinator.py freeze reward_head
+
+  # Verify frozen modules now include reward_mlp, rf_predictor:
+  python coordinator.py status
+
+
+================================================================================
+PHASE 5: TRAIN STAGE 3 - ACTION PLANNER
+================================================================================
+
+Trains the action planner via imitation learning (learn to drive like you).
+Depends on frozen encoder + reward head.
+
+  # Start training
+  python action_planner/train.py
+
+  # What's happening:
+  #   - Reads demo pairs from action_planner/training_data/*.jsonl
+  #   - Input: (z_t, previous_token) -> predicts your token choice
+  #   - Loss: cross-entropy on token prediction
+  #   - Convergence target: top-1 accuracy > 60% (patience: 15)
+  #
+  # Config:
+  #   lr: 3e-4
+  #   batch_size: 16
+  #   convergence: top1_accuracy > 0.6, patience 15
+
+  DASHBOARD AT THIS STAGE:
+    - Metrics View: select "action_planner" in the module selector
+      - Loss (cross-entropy) should decrease
+      - Reward here represents top-1 accuracy (higher = better)
+      - Target: accuracy climbing above 0.6
+    - Hyperparams View: this stage often needs tuning
+      - If stuck below 50% accuracy: lower lr to 1e-4
+      - If loss drops fast then plateaus: you may need more demo data
+        (go back to capture_demos.py, add more diverse driving)
+      - Increase batch_size to 32 for smoother gradients
+    - Sessions View: useful for A/B testing
+      - Try different lr values across sessions
+      - Compare which converges faster or reaches higher accuracy
+    - Weights View: save best checkpoint before experiments
+
+  # When converged:
+  python coordinator.py update action_planner converged --metric 0.65
+
+  # NOTE: action_planner does NOT get frozen. It continues to improve.
+
+
+================================================================================
+PHASE 6: TRAIN STAGE 4 - METACONTROLLER (Live Agent)
+================================================================================
+
+This is where the AI plays GTA V with MCTS search. Runs live (not offline).
+Depends on frozen encoder + reward head. Uses action planner for proposals.
+
+  # Make sure GTA V is running with the SHVDN mod
+  # Then start the frame loop:
+  python metacontroller/frame_loop.py
+
+  # What's happening:
+  #   - Agent plays GTA V in real time
+  #   - Each frame: execute control, read state, run one MCTS search step
+  #   - Makes decisions: EXPLORE / ROLLBACK / COMMIT_NEXT / INTERRUPT
+  #   - Trains via REINFORCE (policy gradient) after each token completes
+  #   - No convergence threshold -- runs until you stop it
+  #
+  # The agent will:
+  #   1. Use action_planner to propose candidate tokens
+  #   2. Use intuition_head to simulate outcomes
+  #   3. Use reward_head to score transitions
+  #   4. Use metacontroller MLP to decide search actions
+  #   5. Learn from realized rewards via policy gradient
+
+  DASHBOARD AT THIS STAGE (most important — all views are active):
+    - Metrics View: select "metacontroller"
+      - Reward curve = per-step reward signal. Should trend up.
+      - Episode Return = total reward per episode. THE primary metric.
+        Plateaus = agent needs new experiences or param tuning.
+      - Loss = policy gradient loss. Can be noisy; focus on reward.
+    - Decisions View: THIS IS WHERE IT SHINES
+      - Shows EXPLORE / ROLLBACK / COMMIT_NEXT / INTERRUPT distribution
+      - Early training: mostly EXPLORE (agent is searching, learning)
+      - Mid training: mix of EXPLORE + COMMIT (gaining confidence)
+      - Late training: mostly COMMIT_NEXT (agent is decisive)
+      - WARNING signs:
+        - All INTERRUPT = agent is panicking, reduce search budget or
+          add more training data from easier scenarios
+        - All ROLLBACK = tree is hitting dead ends everywhere, reward head
+          may need recalibration
+        - Stuck on EXPLORE forever = commit threshold too high, lower it
+          in Hyperparams view
+    - Embeddings View: real-time agent state visualization
+      - Context coloring shows what situation the agent is currently in
+      - Watch for the agent visiting diverse states (good exploration)
+      - If stuck in one cluster = agent is looping/stuck in game
+    - Predictions View: intuition head accuracy in live conditions
+      - If MSE suddenly rises = agent is entering unseen situations
+      - May indicate you need to capture more training data for those areas
+    - Hyperparams View: live tuning while agent plays
+      - entropy_coeff: increase for more exploration, decrease for exploitation
+      - lr: lower if reward is oscillating wildly
+      - These take effect on the next token completion (within seconds)
+    - Weights View: critical during live training
+      - Save checkpoints of good-performing agents
+      - If agent degrades after a change: restore immediately
+      - Download best checkpoint for deployment
+    - Sessions View: compare agent performance across sessions
+      - Overlay episode returns to see if the agent is improving
+      - Each time you restart frame_loop.py = new session
+
+  # Stop with Ctrl+C when you're satisfied with performance
+
+
+================================================================================
+QUICK REFERENCE: FULL SEQUENCE OF COMMANDS
+================================================================================
+
+  # --- SETUP ---
+  python coordinator.py init
+  python -m dashboard.server --port 8000    # separate terminal, keep open
+
+  # --- CAPTURE DATA (play GTA for 15-30 min per session, repeat 5-20x) ---
+  python capture_states.py        # state pairs for encoder + reward
+  python capture_demos.py         # player controls for action planner
+
+  # --- BUILD TOKENIZER ---
+  python tokenizer/tokenizer.py build
+
+  # --- STAGE 1: Encoder + Intuition ---
+  python main_model/train.py
+  # Dashboard: Metrics (loss -> 0.05), Embeddings (clusters forming)
+  python coordinator.py update encoder_intuition converged --metric <MSE>
+  python coordinator.py freeze encoder_intuition
+
+  # --- STAGE 2: Reward Head ---
+  python reward_head/train.py
+  # Dashboard: Metrics (loss -> 0.1), Predictions (scatter tightening)
+  python coordinator.py update reward_head converged --metric <MSE>
+  python coordinator.py freeze reward_head
+
+  # --- STAGE 3: Action Planner ---
+  python action_planner/train.py
+  # Dashboard: Metrics (accuracy -> 60%+)
+  python coordinator.py update action_planner converged --metric <accuracy>
+
+  # --- STAGE 4: Metacontroller (live GTA agent) ---
+  python metacontroller/frame_loop.py
+  # Dashboard: Decisions (EXPLORE -> COMMIT shift), Metrics (reward rising)
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+  PROBLEM: "coordinator.py next" says stage is blocked
+  FIX:    Previous stage must converge AND be frozen first.
+          python coordinator.py status   # check what's missing
+          python coordinator.py freeze <stage_name>
+
+  PROBLEM: Stage shows "training" but process crashed
+  FIX:    Coordinator detects stale training (no checkpoint update in 5 min).
+          python coordinator.py update <stage_name> pending
+          Then restart the training script.
+
+  PROBLEM: Not enough training data
+  FIX:    Capture more sessions. More diverse driving = better model.
+          Aim for 10+ sessions covering highways, city, combat.
+
+  PROBLEM: Loss not converging
+  FIX:    Use dashboard Hyperparams view (no restart needed):
+          - Lower learning rate (try 1e-4 instead of 3e-4)
+          - Increase batch size (try 16 or 32)
+          - Check if data quality is good (varied scenarios)
+
+  PROBLEM: Action planner stuck below 60% accuracy
+  FIX:    - Need more demo data with consistent driving behavior
+          - Try lowering lr to 1e-4 via dashboard Hyperparams
+          - Increase patience in training_config.json
+
+  PROBLEM: Dashboard not showing data
+  FIX:    - Check that training scripts are writing to */training_data/*.jsonl
+          - Collector polls every 1.5s; wait a moment
+          - Check terminal for FastAPI errors
+          - Sidebar should show green "Live" dot
+
+  PROBLEM: Dashboard shows "Disconnected" (red dot)
+  FIX:    - Server may have crashed — check the terminal running dashboard
+          - Restart: python -m dashboard.server --port 8000
+          - Browser auto-reconnects every 5 seconds
+
+  PROBLEM: Named pipe not connecting to GTA
+  FIX:    - Ensure GTA V is running with SHVDN loaded
+          - Check that GTA5_StateStreamer.cs script is active
+          - Pipe name: \\.\pipe\GTA5State
+
+  PROBLEM: Changed hyperparams but training didn't improve
+  FIX:    - Go to Weights View, restore previous best checkpoint
+          - Try a smaller change (2x not 10x)
+          - Use Sessions View to compare before/after
+
+
+================================================================================
+HYPERPARAMETER TUNING GUIDE
+================================================================================
+
+  You can tune hyperparameters two ways:
+    1. Edit training_config.json directly (applies on next script restart)
+    2. Use the dashboard Hyperparams view (hot-reload, no restart needed)
+
+  HOT-RELOAD WORKFLOW (recommended):
+    a) Notice loss plateau or spike in Metrics view
+    b) Go to Hyperparams view
+    c) Adjust value (see safe ranges below)
+    d) Click Apply
+    e) Watch Metrics view — effect visible within 50 steps
+    f) If things get worse: Weights view -> restore checkpoint
+
+  SAFE RANGES:
+  ┌──────────────────────┬─────────────┬────────────────────────────────┐
+  │ Parameter            │ Safe Range  │ Notes                          │
+  ├──────────────────────┼─────────────┼────────────────────────────────┤
+  │ Learning Rate        │ 1e-5 - 1e-3│ Start at 3e-4, lower if spiky  │
+  │ Batch Size           │ 4 - 128    │ Larger = smoother but slower   │
+  │ Max Grad Norm        │ 0.1 - 2.0  │ Clip gradients, prevent spikes │
+  │ Convergence Patience │ 5 - 30     │ Higher = more conservative     │
+  │ Entropy Coefficient  │ 0.001-0.05 │ Stage 4 only. Higher = explore │
+  └──────────────────────┴─────────────┴────────────────────────────────┘
+
+
+================================================================================
+ESTIMATED TIMELINE
+================================================================================
+
+  Phase 0: Init .......................... 1 minute
+  Phase 1: Capture data .................. 2-5 hours (across sessions)
+  Phase 2: Build tokenizer ............... 2-5 minutes
+  Phase 3: Train encoder+intuition ....... 1-4 hours (depends on GPU/data)
+  Phase 4: Train reward head ............. 30 min - 2 hours
+  Phase 5: Train action planner .......... 1-3 hours
+  Phase 6: Live agent (metacontroller) ... Ongoing (improves continuously)
+
+  Total to first working agent: ~1-2 days of focused work
+
+
+================================================================================
+RESUMING AFTER A BREAK
+================================================================================
+
+  # See where you left off:
+  python coordinator.py status
+  python coordinator.py next
+
+  # The "next" command tells you exactly what to run.
+  # If a training script was interrupted, most support --resume:
+  python main_model/train.py --resume
+  python reward_head/train.py --resume
+  python action_planner/train.py --resume
+
+  # Start dashboard again:
+  python -m dashboard.server --port 8000
+  # Sessions View will show your previous sessions and metrics
+
+
+================================================================================

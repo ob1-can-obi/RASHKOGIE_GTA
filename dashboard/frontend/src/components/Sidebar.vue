@@ -18,6 +18,7 @@ defineProps({
       <li><router-link to="/embeddings">Embeddings</router-link></li>
       <li><router-link to="/predictions">Predictions</router-link></li>
       <li><router-link to="/weights">Weights</router-link></li>
+      <li><router-link to="/help">Help</router-link></li>
     </ul>
     <div class="sidebar-footer">
       <span class="status-dot" :class="connected ? 'live' : 'offline'"></span>
