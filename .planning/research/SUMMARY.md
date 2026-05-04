@@ -1,19 +1,17 @@
 # Project Research Summary
 
-**Project:** RASHKOGIE GTA — MCTS-based RL Driving Agent with Rational Cognition Metacontroller
-**Domain:** MCTS + Policy Gradient RL with Learned Metalevel Deliberation Controller (Value of Cognition)
-**Researched:** 2026-04-30
+**Project:** RASHKOGIE GTA — v1.1 Training Optimization
+**Domain:** PyTorch offline training pipeline optimization for autonomous driving RL agent
+**Researched:** 2026-05-04
 **Confidence:** HIGH
-
----
 
 ## Executive Summary
 
-RASHKOGIE GTA is a brownfield research project implementing a Value of Cognition metacontroller on top of a BPE-tokenized MCTS driving agent in GTA V. The core research thesis is that a neural metacontroller can learn when deliberation (tree search) is worth its cost — deciding at each step whether to EXPLORE the search tree further, COMMIT to the current best path, INTERRUPT early, or ROLLBACK. All major modules exist; the remaining work is completing training infrastructure, fixing a critical exploration bug, and building a monitoring dashboard. The recommended approach is: fix the argmax-during-training bug immediately, add entropy regularization and reward shaping penalties, build a staged training pipeline that freezes modules in strict order, and expose all training controls via a custom FastAPI dashboard.
+RASHKOGIE GTA v1.1 is a targeted performance optimization milestone for an existing PyTorch-based autonomous driving agent. The project has a working training pipeline, 88 GB of captured JSONL data (~236k records, ~800 MB of useful numeric content once converted), and a module-per-directory architecture covering encoder, reward head, action planner, and metacontroller. The v1.1 goal is to move from a CPU-paced pseudo-batch training loop (GPU utilization ~10-20%) to true GPU-batched training on an RTX 3070 Ti (8 GB VRAM) using compact tensor storage, learned categorical embeddings, DataLoader integration, and CUDA AMP mixed precision.
 
-The biggest risk to this project is not architectural — it is that three compounding bugs currently prevent any meaningful training signal from reaching the metacontroller. First, the metacontroller uses argmax instead of categorical sampling during training, which eliminates all exploration. Second, there is no entropy regularization, so the policy would collapse to a single action even if sampling were fixed. Third, the reward structure incentivizes zero-search commits via the think_cost mechanism without a counterbalancing not-ready penalty. These three issues must be resolved in sequence before any RL training runs are valid. Until fixed, every training step produces corrupted data.
+The recommended approach follows a strict dependency chain: data format comes first (preprocessing must extract categorical integer indices and guard against OneDrive corruption before the 88 GB conversion runs), then embedding integration (new `nn.Embedding` tables added to the encoder dict with explicit optimizer registration), then training loop batching (inner Python loop replaced with `TensorDataset` + `DataLoader`), and finally AMP (fp16 `autocast` + `GradScaler` applied across all three trainers). All four areas use PyTorch core APIs only — no new packages are required. The single infrastructure change is switching from `torch+cpu` to `torch+cu124` in the Windows-native Python environment (WSL2 does not expose the RTX 3070 Ti regardless of torch version).
 
-The architecture is well-designed for its research goals, with a clean 5-phase training dependency chain (encoder → intuition head → reward head → action planner → metacontroller). The main architectural upgrades needed are: deeper MLPs (3-layer with skip connections for the metacontroller, which has a 237-dim heterogeneous input), LayerNorm throughout (batch=1 at 20 Hz invalidates BatchNorm), and a second attention block in the encoder. The stack requires only three new dependencies (FastAPI, uvicorn, sse-starlette) on top of the existing PyTorch 2.11 environment. Keep everything else as-is — no RL frameworks, no cloud tools.
+The primary risks are silent-failure class errors: preprocessing building 16+ GB intermediate lists on a system already loaded by GTA V; old float32 categorical fields silently passing to embedding lookup and producing wrong results; GradScaler skipping every optimizer step when embedding gradients overflow to `inf` in fp16; and OneDrive corrupting large `.pt` files during background sync. All of these are detectable and preventable with explicit assertions and monitored validation gates at each phase boundary. Existing checkpoints are incompatible with the new encoder (MLP input dims grow: ego 46→54, scene 16→24, entity 24→40); v1.1 trains from scratch by design.
 
 ---
 
@@ -21,148 +19,150 @@ The architecture is well-designed for its research goals, with a clean 5-phase t
 
 ### Recommended Stack
 
-The project is already on the correct core stack: PyTorch 2.11 + Python 3.12 with a custom architecture. The training infrastructure needs three targeted upgrades: (1) replace manual SGD with `torch.optim.Adam(lr=3e-4)` and add `clip_grad_norm(max_norm=0.5)` across all module optimizers — manual SGD is documented to fail on noisy policy gradient objectives; (2) add a custom deque-based trajectory buffer (no external dependency needed) that flushes every 8 complete metalevel trajectories to reduce REINFORCE variance from unbounded single-sample to meaningful batch estimates; (3) build the training dashboard with FastAPI + SSE + vanilla JS + Chart.js, avoiding any Node.js/React/TensorBoard dependencies that would conflict with the Windows gaming PC environment.
+No new packages are required for v1.1. All four feature areas are served by existing PyTorch 2.x core APIs. The only infrastructure change is switching from the CPU build to the CUDA build in the Windows-native Python environment. The CUDA index URL (`https://download.pytorch.org/whl/cu124`) is already in `requirements.txt`. WSL2 cannot access the RTX 3070 Ti regardless of torch version — all training scripts must run from Windows cmd/PowerShell, not WSL2.
 
 **Core technologies:**
-- PyTorch 2.11 + `torch.distributions.Categorical`: all NN ops and stochastic sampling — already in use, add Categorical for REINFORCE
-- `torch.optim.Adam` (lr=3e-4, eps=1e-5): replace manual SGD — adaptive lr is required for non-stationary PG gradients
-- `torch.nn.utils.clip_grad_norm_(max_norm=0.5)`: catastrophic update prevention — required given GTA's large reward variance
-- Custom `deque`-based trajectory buffer (stdlib): variance reduction — variable-length metalevel trajectories don't fit TorchRL
-- FastAPI 0.115 + sse-starlette 2.1 + uvicorn: training dashboard — native async SSE, no Node.js required
-- Chart.js (CDN): live loss curves — 60KB, no npm, handles streaming updates natively
-- `torch.save`/`torch.load` + JSON sidecars: checkpointing — offline single-machine; no cloud tools needed
+- `torch.amp.autocast` + `torch.amp.GradScaler("cuda")` — mixed precision training; must use the unified 2.x API, not the deprecated `torch.cuda.amp.*` namespace which produces warnings in PyTorch 2.x
+- `torch.utils.data.TensorDataset` + `DataLoader` — batched training; `pin_memory=True`, `num_workers=0` (Windows spawn safety), `drop_last=True` for Tensor Core alignment
+- `torch.nn.Embedding` — learned categorical embeddings for `weather`, `v_class`, `v_model`, entity `type_id`, entity `bucket_id`; five tables totaling less than 1 MB VRAM
+- `torch.save` / `torch.load` — compact `.pt` tensor format already in use; extended to include `torch.long` categorical index tensors alongside existing float tensors
 
-**Explicitly excluded:** stable-baselines3, torchrl, wandb, mlflow, tensorboard, React/Vue/Node.js, numpy (all tensors stay in PyTorch).
-
-See `.planning/research/STACK.md` for full rationale and installation commands.
+**Critical hardware and version constraints:**
+- fp16 not bf16: RTX 3070 Ti (Ampere sm_86) does not hardware-accelerate bf16 matmul; bf16 runs at fp32 speed on this card
+- `num_workers=0` on Windows: `num_workers>0` causes `EOFError` in spawn multiprocessing when training scripts are imported as modules; no performance cost since the dataset is RAM-resident (~800 MB)
+- Batch sizes must be multiples of 8 for Tensor Core activation; use 64, 128, or 256 — not arbitrary values like 100 or 150
 
 ### Expected Features
 
-The feature priority list is unusually clear for a brownfield project because the bugs and missing pieces are already identified in PROJECT.md. The must-have items are not new features — they are correctness fixes that enable any training to happen at all.
+**Must have — table stakes for GPU training:**
+- True batched encoder forward pass: `encode_tensors()` accepts `[B, dim]` tensors; replaces per-record `[1, dim]` Python inner loop that causes 10-50x GPU underutilization
+- `DataLoader` integration: replaces manual index slicing; provides automatic shuffle, `pin_memory`, and `drop_last`
+- Compact `.pt` format with categorical `torch.long` indices: prerequisite for both batching and embeddings; updated `preprocess_data.py` extracts integer index tensors alongside existing float tensors
+- CUDA AMP (`autocast` + `GradScaler`): applied to all three trainers; `clip_grad_norm_` must be called after `scaler.unscale_()`, not before
+- Action planner preprocessing path: `action_planner/train.py` currently has no `.pt` fast path; `preprocess_action_planner()` must be added to `preprocess_data.py`
 
-**Must have (table stakes — training correctness):**
-- Categorical sampling fix (`argmax` → `dist.sample()` during training) — current code produces zero exploration
-- Entropy regularization (`-entropy_coeff * H(pi)` in loss) — prevents policy collapse to single action
-- Not-ready penalty (token expires without commit → large negative reward) — required for coherent reward signal
-- Lazy-commit penalty (COMMIT_NEXT at search depth 0 → negative reward) — counterbalances think_cost hacking
-- REINFORCE with advantage normalization (zero-mean, unit-variance per batch) — prevents reward-scale instability
-- Trajectory buffer + batch gradient updates (N=8 trajectories per flush) — REINFORCE variance is unbounded at N=1
-- Adam optimizer + gradient clipping for all modules — manual SGD cannot handle noisy PG gradients
-- Per-module checkpointing with optimizer state saved — multi-session training requires resumable state
-- Module freeze/unfreeze enforcement with convergence detection — training order is a correctness requirement, not a preference
+**Should have — model quality improvements:**
+- Learned categorical embeddings (`nn.Embedding`): weather (dim 4), v_class (dim 8), v_model (dim 8, capped at 200 vocab entries), entity `type_id` (dim 4), entity `bucket_id` (dim 4); eliminates the false ordinal relationship imposed by float-encoding nominal categories
+- New `main_model/embedding_tables.py`: centralizes vocabulary size constants and `create_embedding_tables()` so preprocessor and trainer share the same definitions
+- Updated `capture_states.py` compact capture: new game sessions write buffered tensor dicts instead of raw JSONL; eliminates the preprocessing step for future captures
 
-**Should have (training visibility and research diagnostics):**
-- Decision distribution logging (EXPLORE/INTERRUPT/COMMIT_NEXT/ROLLBACK histogram) — primary health indicator
-- Policy entropy metric per step (target: 0.5–1.5 nats; alert below 0.3) — collapse detector
-- Custom FastAPI training dashboard (live loss curves, episode return, decision histogram) — loop iteration speed
-- Hyperparameter control panel (entropy_coeff, think_cost, lr, batch_size tunable from browser without restart)
-- Per-session CSV + SVG session graphs for each module
-- Search depth distribution per episode histogram — validates that metacontroller is learning to deliberate contextually
-- Pre-commit Q improvement (delta Q = committed_q − initial_top1_q) — proves search is worth doing
-
-**Defer to post-validation:**
-- Value of Cognition estimate per frame (too noisy until metacontroller is trained; high complexity)
-- Think-cost vs. reward-improvement scatter plot (meaningful only after hundreds of training sessions)
-- Hyperparameter auto-search (manual tuning via dashboard is sufficient at research prototype stage)
-
-See `.planning/research/FEATURES.md` for full feature dependency graph.
+**Defer to v1.1.x / v2+:**
+- `torch.compile()` on the encoder: blocked by the dict-based weight API; requires an `nn.Module` refactor first
+- Chunked mmap DataLoader: unnecessary at 800 MB; only relevant if the dataset grows beyond system RAM
+- Batch size sweep (64→256): run after AMP is stable; not a prerequisite for correctness
+- bf16: only beneficial on Hopper/Ada hardware (RTX 4090+, H100); produces no gain on RTX 3070 Ti
 
 ### Architecture Approach
 
-The 5-phase training pipeline (encoder → intuition head → reward head → action planner → metacontroller) is correctly designed in PROJECT.md and is enforced by data availability. The key architectural upgrades needed are all about capacity and normalization at the individual component level, not about restructuring the pipeline. Every `.detach()` boundary between modules is already in place; the remaining gap is that metacontroller training (Phase 5) currently runs concurrently with reward head training — they must be sequenced with explicit freeze enforcement.
+The existing module-per-directory architecture is preserved entirely. v1.1 changes are surgical: five files are modified, one new file is created, and seven files are explicitly confirmed unchanged. The encoder dict API (`encoder_weights["ego_mlp"](x)`) is retained for this milestone; refactoring to `nn.Module` is deferred. The build order is dictated by hard code dependencies: embedding vocabulary constants must be scanned from real capture data before coding begins, and the data format must be locked before the 88 GB preprocessing run starts.
 
-**Major components and responsibilities:**
+**Major components and their v1.1 changes:**
 
-1. **Encoder (main_model)** — raw GTA state dict → z_t [128]; ego/scene/route MLP projections + 2-block cross-attention over 32 entities; upgrade to 2 stacked attention blocks with LayerNorm; freeze before metacontroller RL phase to prevent z_t distribution drift
+1. `main_model/embedding_tables.py` (NEW) — vocabulary size constants, `create_embedding_tables()`, save/load helpers; must be built first as it is a dependency of both `main_model.py` and `preprocess_data.py`
+2. `preprocess_data.py` (MODIFIED) — adds categorical `torch.long` index extraction to main model and reward head paths; adds new `preprocess_action_planner()` function; switches to two-pass RAM-efficient processing to avoid 16+ GB intermediate peak
+3. `training_utils.py` (MODIFIED) — adds `make_scaler(device)` and `load_tensor_sessions(data_dir)` helper functions; all existing utilities unchanged
+4. `main_model/main_model.py` (MODIFIED) — embedding lookup and concatenation into MLP inputs before each sub-encoder; MLP input dims grow (ego 46→54, scene 16→24, entity 24→40)
+5. `main_model/train.py`, `reward_head/train.py`, `action_planner/train.py` (MODIFIED) — inner loop replaced with `DataLoader`; forward pass wrapped in `autocast`; gradient clipping reordered after `scaler.unscale_()`
+6. `capture_states.py` (MODIFIED) — `StateCaptureSession` writes buffered tensor dicts instead of per-frame JSONL; done last as it has no training dependency
 
-2. **Intuition Head** — (z_t, token_id) → z_next_pred; forward model for tree rollout simulation; train until MSE < 0.05, then freeze; token_embed must be a shared singleton — not recreated between calls
-
-3. **Reward Head** — (z_parent, z_child, rf, duration) → r_edge_pred; edge value estimator for MCTS node scoring; train until MSE < 0.1, then freeze; must use actual rollout duration, not token table duration, for interrupted tokens
-
-4. **Action Planner** — (z_t, z_next_pred) → top-k token candidates; imitation learning from player captures; freeze after top-1 accuracy > 60%; upgrade to 2-layer 256-unit MLP (input is 256-dim concat)
-
-5. **MetaMLP (Metacontroller)** — 237-dim heterogeneous features → EXPLORE/INTERRUPT/COMMIT_NEXT/ROLLBACK logits; upgrade to 3-layer 256-256-128 with skip connection from input to layer 2 and LayerNorm at every hidden layer; Categorical sampling during training, argmax at inference; never frozen — this is the final learned policy
-
-6. **Trajectory Buffer** — accumulates N=8 complete metalevel trajectories, flushes completely on update; never re-uses stale trajectories (on-policy constraint); Adam optimizer instance lives outside the buffer and persists across flushes
-
-7. **FastAPI Dashboard** — SSE streaming of training metrics; POST endpoints for live hyperparameter updates; module freeze/unfreeze toggles; session management with checkpoint history
-
-See `.planning/research/ARCHITECTURE.md` for full data flow diagram and component sizing.
+**Files confirmed unchanged:** `multi_head_attention.py`, `reward_head/reward_head.py`, `metacontroller/`, all checkpoint structures, `training_status.json` schema, `StreamingJSONLDataset` fallback.
 
 ### Critical Pitfalls
 
-1. **Argmax during training kills all exploration** — Use `torch.distributions.Categorical(logits=decision_logits).sample()` during training, argmax only at inference. This is the highest-priority single fix in the codebase; all other metacontroller work is invalid without it.
+1. **RAM explosion in preprocessing** — the current list-based stacking approach peaks at 16+ GB RAM for a single 25 GB session file (Python JSON overhead plus simultaneous tensor list plus stacked output). Fix: two-pass approach (count records first, pre-allocate `torch.zeros(N, dim)`, fill row-by-row) or per-session chunked processing. Must be resolved in Phase 1 before touching the 88 GB dataset.
 
-2. **Entropy collapse to a single decision** — Add `-entropy_coeff * H(pi)` to the policy gradient loss before the first training run. Start at entropy_coeff=0.05 for the first 500 updates, decay to 0.005 by update 2000. Monitor: if policy entropy drops below 0.3 nats before update 500, double the coefficient.
+2. **Float32 categoricals silently corrupting embedding lookup** — old `preprocessed.pt` stores `type_id`, `bucket_id`, etc. as float32 inside `entities_t`; a `.long()` cast silently truncates `3.9999` to 3 or produces out-of-range indices from float values outside `[0, num_categories)`. Fix: define a new separate `entities_cat` tensor of dtype `torch.long`; add a `format_version` key; delete all old `preprocessed.pt` files before training with embeddings.
 
-3. **Think-cost creates zero-search reward hacking** — Add a not-ready penalty (-2.0) when a token expires without a commit, and a lazy-commit penalty (-0.5) when COMMIT_NEXT fires with zero nodes expanded. Think_cost alone incentivizes the degenerate zero-search policy.
+3. **Embedding tables not registered with optimizer** — `create_encoder_weights()` returns a nested dict; if new embedding sub-modules are added under `encoder_weights["cat_embeds"]` but not explicitly added to the Adam `all_params` list, their parameters receive no gradient updates silently. Fix: rebuild `all_params` after any dict mutation; add assertion that param count in optimizer matches expected total including embedding parameters.
 
-4. **Training metacontroller with a live reward head** — The reward head must be frozen (`.requires_grad_(False)`) before metacontroller RL begins. Concurrent updates create a moving reward target, which is the "deadly triad" instability in practice. Do not skip the strict training order.
+4. **GradScaler silent step-skipping** — new `nn.Embedding` tables initialized at default std=1.0 with a high learning rate can produce `inf` gradients in fp16 on the first backward pass; GradScaler halves the scale and skips the step every iteration, leaving the model frozen while loss appears constant. Fix: initialize embedding weights with `std=0.01`; log `scaler.get_scale()` per step; alert if it drops below 256.
 
-5. **Manual SGD without gradient clipping risks a single catastrophic update** — A large GTA reward (goal reached = +25) combined with no gradient clipping can overwrite the entire policy in one step. Add `clip_grad_norm_(max_norm=0.5)` and switch to Adam before any training run.
-
-See `.planning/research/PITFALLS.md` for 14 pitfalls with detection signals.
+5. **OneDrive corrupts large `.pt` files** — the project lives under `C:\Users\laksh\OneDrive\Documents\`; OneDrive's file system filter can acquire a read lock during `torch.save()` of 800 MB files, producing a truncated file that raises `EOFError` at next load with no write-time error. Fix: write to a temp directory outside OneDrive and use `shutil.move()` atomically, or use a `.tmp` suffix and rename on success.
 
 ---
 
 ## Implications for Roadmap
 
-Based on combined research, the correct phase structure follows the strict data dependency chain in the project's own architecture. Phases 1-2 are unblocking correctness fixes. Phases 3-5 are the staged training pipeline. Phase 6 is the research contribution layer on top.
+The research produces a clear, dependency-driven phase structure. The phases map directly to the pitfall-to-phase table in PITFALLS.md and the build order in ARCHITECTURE.md. Each phase has a hard validation gate before the next may begin.
 
-### Phase 1: Training Infrastructure Hardening
-**Rationale:** Three compounding bugs (argmax sampling, no entropy reg, broken SGD) make every subsequent training run invalid. These are one-line or few-line fixes that must happen before any other work produces meaningful signal. No new modules — only fixes to existing code.
-**Delivers:** A valid REINFORCE training loop that can produce exploration, gradient stability, and a coherent reward signal.
-**Addresses:** Categorical sampling fix, entropy regularization, not-ready penalty, lazy-commit penalty, Adam + gradient clipping, advantage normalization.
-**Avoids:** Pitfalls 1, 2, 3, 5, 10 (the five that prevent convergence entirely).
+### Phase 1: Data Format
 
-### Phase 2: Batch Training and Checkpointing
-**Rationale:** Single-sample REINFORCE has unbounded variance. The replay buffer and checkpoint system are prerequisites for any extended training session. Adam optimizer state must persist across flushes or it resets to cold start.
-**Delivers:** Trajectory buffer (N=8 flush), per-module checkpointing with optimizer state, module freeze/unfreeze logic with convergence detection, per-session training logs.
-**Uses:** Custom deque buffer (stdlib), `torch.save`/`torch.load` + JSON sidecars, Adam optimizer as persistent instance.
-**Avoids:** Pitfall 5 (single-sample variance), Pitfall 6 (reward head concurrent training), Pitfall 8 (encoder drift during metacontroller RL).
+**Rationale:** Every downstream feature depends on correct data format. The 88 GB preprocessing run is the longest-running wall-time operation in the milestone. It must be started early and must produce correct output — getting the format wrong and having to reprocess is the highest time cost in the entire milestone.
 
-### Phase 3: Architecture Upgrades
-**Rationale:** MLP capacity and normalization upgrades are prerequisites for the metacontroller to express non-trivial decision functions over its 237-dim input. LayerNorm must precede adding the second attention block. MetaMLP class must be `nn.Module` compatible for checkpointing before it is deployed in training.
-**Delivers:** 3-layer MetaMLP with skip connection and LayerNorm; 2-block stacked encoder attention with LayerNorm; 2-layer action planner MLP. All modules verifiably serializable.
-**Implements:** MetaMLP class replacing inline nn.Sequential, second attention block in encoder, LayerNorm after every hidden layer and attention block.
-**Avoids:** Pitfall 4 (insufficient MLP capacity), ARCHITECTURE anti-patterns 3 and 5.
+**Delivers:** `preprocessed.pt` files for all three modules (main model, reward head, action planner) containing float tensors and separate `torch.long` categorical index tensors; a `format_version` key for compatibility detection; write-to-temp-then-rename pattern applied to all saves to guard against OneDrive corruption.
 
-### Phase 4: Staged Module Training Pipeline
-**Rationale:** The training order (intuition → reward → planner → metacontroller) is a correctness constraint, not a preference. Each upstream module must converge and freeze before the downstream module's training data is valid. This phase implements the full pipeline with convergence monitoring.
-**Delivers:** Working training loops for intuition head (MSE on z_next_pred), reward head (MSE on token returns), action planner (imitation learning BCE + MSE), metacontroller (REINFORCE + entropy). Convergence-triggered freeze protocol for each. Encoder frozen during metacontroller RL phase.
-**Avoids:** Pitfall 6 (moving reward target), Pitfall 7 (reward double-counting calibration), Pitfall 8 (encoder drift), Pitfall 9 (BPE token duration normalization), Pitfall 13 (token_embed singleton), Pitfall 14 (INTERRUPT duration mismatch).
+**Addresses:** Compact `.pt` format (table stakes), updated preprocessor with categorical index extraction, action planner preprocessing path, preprocessing tool for existing 88 GB JSONL.
 
-### Phase 5: FastAPI Training Dashboard
-**Rationale:** The dashboard is a force-multiplier for iteration speed and the research contribution layer requires live visibility into decision distributions and entropy. Build after core training works so the dashboard shows real data from the start.
-**Delivers:** FastAPI SSE server, single-HTML frontend with Chart.js, live loss curves for all 4 modules, episode return curve, decision distribution histogram, policy entropy curve, hyperparameter control panel (entropy_coeff, think_cost, lr, batch_size, penalty weights tunable without restart), module freeze/unfreeze controls, session history table with checkpoint paths.
-**Uses:** FastAPI 0.115, sse-starlette 2.1, uvicorn, Chart.js (CDN), asyncio.Queue thread bridge.
-**Avoids:** Pitfall 12 (policy gradient loss curves are misleading — primary metrics are episode return + decision distribution, not total_loss).
+**Avoids:** RAM explosion in preprocessing (Pitfall 1), float32 categoricals breaking embedding lookup (Pitfall 2), OneDrive file corruption (Pitfall 7).
 
-### Phase 6: Research Metrics and Validation
-**Rationale:** Value of Cognition metrics are meaningful only after the metacontroller has completed significant training. These are the research contribution deliverables, deferred until upstream training is validated.
-**Delivers:** Search depth distribution per episode histogram, pre-commit Q improvement (delta Q) curve, Value of Cognition estimate per frame (noisy but trending), think-cost vs. reward-improvement scatter plot, multi-session comparison tooling.
-**Addresses:** All "differentiator" features from FEATURES.md.
+**Validation gate:** `torch.load(preprocessed.pt)["entities_cat"].dtype == torch.long`; `format_version` key present; file size matches expected; action planner `.pt` loads without error.
+
+### Phase 2: Learned Categorical Embeddings
+
+**Rationale:** Embeddings require the `torch.long` index tensors from Phase 1. They must be built before the training loop refactor because the refactor must know the correct MLP input dimensions (`ego_mlp` 46→54, etc.). Embedding tables must also be explicitly registered with the optimizer before AMP is layered on — catching the optimizer-registration pitfall in isolation is simpler than debugging it alongside GradScaler skip behavior.
+
+**Delivers:** `main_model/embedding_tables.py` with confirmed vocabulary sizes scanned from real data; updated `create_encoder_weights()` and `encode_tensors()` with embedding lookup and concatenation; updated MLP input dimensions; smoke test confirming `z_t.shape == [1, 128]` with embedding tables active; checkpoint save/load updated to include embedding table state dicts.
+
+**Addresses:** Learned categorical embeddings (differentiator), embedding table centralization.
+
+**Avoids:** Embedding tables not in optimizer (Pitfall 3), embedding state not in checkpoint (Architecture anti-pattern 5), out-of-bounds embedding index from edge GTA category values (add `.clamp(0, VOCAB_SIZE - 1)` before every lookup).
+
+**Validation gate:** Assert optimizer param count equals expected total including embedding parameters; verify `z_t.dtype` is correct; confirm embedding keys are present in saved checkpoint.
+
+### Phase 3: Batched Training Loop
+
+**Rationale:** True batching is the primary GPU utilization fix and the core deliverable of v1.1. It requires Phase 1 (`.pt` data in RAM for O(1) slicing) and Phase 2 (correct MLP input dims so `[B, dim]` forward passes produce correct `[B, 128]` output). Batching is validated in fp32 before AMP is added so that AMP-related issues do not obscure batching shape errors.
+
+**Delivers:** All three trainers using `TensorDataset` + `DataLoader`; single `.to(device, non_blocking=True)` call per batch; `encode_tensors()` verified to handle `[B, 46]` input and return `[B, 128]`; GPU utilization above 60% confirmed by `nvidia-smi`.
+
+**Addresses:** Per-record Python loop defeating GPU batching (table stakes), DataLoader integration (table stakes), CPU-to-GPU transfer minimization.
+
+**Avoids:** Staging all data on VRAM (keep in CPU RAM, slice and transfer one batch at a time), `unsqueeze(0).to(device)` inside the batch loop, `torch.cat` on a list of per-record tensors.
+
+**Validation gate:** `nvidia-smi` GPU utilization above 60% during training; `encode_tensors()` returns `[B, 128]` for B=32; training loss curve matches pre-refactor behavior within noise over first 100 steps.
+
+### Phase 4: CUDA Mixed Precision (AMP)
+
+**Rationale:** AMP is last because it depends on everything before it. Tensor Core throughput gain requires batched inputs (Phase 3). GradScaler behavior is easier to diagnose once the optimizer already correctly registers all parameters including embeddings (Phase 2). Start with batch_size=32 (not 256) to verify VRAM headroom with GTA V potentially running before scaling up.
+
+**Delivers:** `torch.amp.autocast` wrapping the forward pass in all three trainers; `GradScaler` wrapping the backward with correct gradient clipping order (`scaler.unscale_()` before `clip_grad_norm_`); `make_scaler(device)` helper in `training_utils.py`; `training_config.json` updated with `amp: true` and increased batch sizes; per-step GradScaler scale monitor; VRAM headroom verified.
+
+**Addresses:** AMP mixed precision (table stakes), batch size tuning (P2 feature).
+
+**Avoids:** GradScaler silent step-skipping (Pitfall 6 — initialize embeddings at std=0.01, monitor scale per step), AMP OOM from GTA VRAM contention (Pitfall 5 — log `max_memory_allocated()` after first backward, start at batch_size=32), MSE underflow in fp16 for small prediction errors (cast loss inputs to fp32: `mse_loss(z_next_pred.float(), z_t1_real.float())`).
+
+**Validation gate:** `z_t.dtype == torch.float16` inside autocast block; `scaler.get_scale()` above 256 after 10 steps; `torch.cuda.max_memory_allocated()` below 5 GB; GPU utilization above 60% at target batch size.
+
+### Phase 5: Compact Capture Format
+
+**Rationale:** `capture_states.py` changes do not block training and do not depend on any Phase 1-4 output. Doing this last means the entire training pipeline is validated before committing to the new capture format. Future game sessions will write pre-built tensor dicts, eliminating the preprocessing step.
+
+**Delivers:** `StateCaptureSession` writes buffered tensor dicts to `session_*.pt` files; flushes every 1000 frames into an accumulator and saves once on `close()`; small sidecar JSON metadata for human inspection; write-to-temp-then-rename for crash safety.
+
+**Addresses:** Inline compact capture (P2 differentiator).
+
+**Avoids:** Data loss on game crash (flush-then-concatenate strategy), OneDrive corruption of per-session `.pt` files.
 
 ### Phase Ordering Rationale
 
-- Phases 1-2 must precede all other phases because the training loop is currently broken in ways that corrupt every gradient update. No architecture work has value until the training loop produces valid signal.
-- Phase 3 (architecture upgrades) can proceed in parallel with the end of Phase 2 (checkpointing), since the MetaMLP class can be designed and unit-tested before it is plugged into live training.
-- Phase 4 follows Phase 3 because the upgraded MetaMLP must be the version trained, not the old single-layer net.
-- Phase 5 (dashboard) is intentionally after Phase 4 because a dashboard showing garbage data from an untrained model wastes iteration time.
-- Phase 6 (research metrics) is last because those metrics are only scientifically meaningful after substantial training — putting them earlier creates false signals.
+- Data format is first because the 88 GB preprocessing run is the longest wall-time operation and must produce correct `torch.long` indices before embeddings can be coded.
+- Embeddings are second because they change MLP input dimensions, and those dimensions must be correct before the batching refactor is written.
+- Batching is third because it is the core GPU utilization fix and should be debugged in fp32 before AMP is layered on top.
+- AMP is last because it depends on correct optimizer registration (Phase 2) and batch dimensions (Phase 3); debugging GradScaler skip behavior is much easier when everything else is already working.
+- Capture format is decoupled and done last to avoid blocking the training improvement work.
 
 ### Research Flags
 
-Phases where deeper research may be needed during planning:
-- **Phase 4:** Convergence thresholds (MSE < 0.05 for intuition head, MSE < 0.1 for reward head, top-1 accuracy > 60% for planner) are heuristics — the actual thresholds depend on GTA reward scale in practice. May need empirical calibration after 1-2 training sessions.
-- **Phase 4:** BPE token duration normalization (Pitfall 9) — the exact normalization formula and its interaction with the discount factor needs validation against actual token length distributions in GTA V.
-- **Phase 6:** Value of Cognition estimate formula — the specific estimator `(best_path_value - mean_q_at_commit) / think_cost_paid` is a first-order approximation; the literature on rational metareasoning suggests more rigorous VOC estimators but they require stable reward head predictions first.
+Phases needing extra care during implementation:
 
-Phases with well-documented patterns (standard implementation, skip deep research):
-- **Phase 1:** All fixes are documented PyTorch patterns (Categorical, entropy loss, Adam) — no ambiguity.
-- **Phase 2:** Deque buffer and `torch.save` checkpoint patterns are fully documented — straightforward implementation.
-- **Phase 3:** MLP sizing (256-256-128) and LayerNorm placement follow established SB3 and transformer conventions.
-- **Phase 5:** FastAPI SSE + Chart.js streaming is a well-documented pattern with working examples.
+- **Phase 1 (Data Format):** Vocabulary sizes for `weather`, `v_class`, `v_model`, entity `type_id`, and `bucket_id` must be scanned from real capture session files before writing `embedding_tables.py` constants. GTA V has been observed to return edge values (e.g., `v_class=255` for unknown vehicles); without `.clamp(0, VOCAB_SIZE - 1)` before every embedding lookup, this will cause an `IndexError` at training time.
+- **Phase 2 (Embeddings):** `freeze_module()` in `training_utils.py` does not recurse into nested dicts. Embedding tables stored under `encoder_weights["cat_embeds"]` will not be frozen when the reward head trainer calls `freeze_module(encoder_weights)`. Either flatten embedding tables to top-level keys in `encoder_weights` (simpler, consistent with how `ego_mlp` etc. are stored) or update `freeze_module()` to recurse into nested dicts.
+- **Phase 4 (AMP):** AMP + MSE loss between fp16 tensors can underflow for small prediction errors (below 6e-5), giving zero loss silently. Cast loss inputs to fp32 before computing MSE: `mse_loss(z_next_pred.float(), z_t1_real.float())`.
+
+Phases with standard, well-documented patterns where additional research is not needed:
+
+- **Phase 3 (Batching):** `TensorDataset` + `DataLoader` with `pin_memory=True` is canonical PyTorch; no implementation ambiguity.
+- **Phase 5 (Capture):** Buffer-and-flush with `shutil.move` atomic rename is a standard safe-write pattern; straightforward implementation.
 
 ---
 
@@ -170,47 +170,45 @@ Phases with well-documented patterns (standard implementation, skip deep researc
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | PyTorch 2.11, Adam, gradient clipping — all verified against PyTorch release notes and RL literature. FastAPI SSE pattern is documented. No experimental choices. |
-| Features | HIGH | Features derived from direct code audit of existing modules. Training correctness issues are observable, not inferred. |
-| Architecture | HIGH | Input dimensions confirmed by tracing live code (237-dim verified). MLP sizing follows SB3 conventions. LayerNorm vs. BatchNorm reasoning is batch-size-independence logic, not opinion. |
-| Pitfalls | HIGH | 5 of 14 pitfalls are observable current bugs in the codebase (verified via code audit). Remaining pitfalls are standard RL failure modes with documented detection signals. |
+| Stack | HIGH | All APIs verified against PyTorch 2.11 official docs; cu124 URL confirmed already in requirements.txt; RTX 3070 Ti Ampere sm_86 hardware specs confirmed; bf16 non-acceleration on Ampere confirmed from NVIDIA docs |
+| Features | HIGH | Derived from direct code audit of all training scripts, preprocessor, and capture pipeline; current per-record loop pattern confirmed by reading `main_model/train.py` line-by-line |
+| Architecture | HIGH | All findings from direct codebase reading; build order validated against actual import dependencies; MLP input dimension changes computed from field lists in `main_model.py` |
+| Pitfalls | HIGH | RAM explosion derived from measured session file sizes (25 GB largest session) and Python dict overhead characteristics; OneDrive pitfall from confirmed project path; GradScaler skip from PyTorch source |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **Optimal entropy_coeff schedule thresholds (500/2000 update cutoffs):** These depend on actual GTA token frequency and reward scale in live play. Treat the 0.05 → 0.02 → 0.005 schedule as a starting point; log entropy at every flush and adjust manually via the dashboard control panel. Do not hard-code the schedule before observing real entropy curves.
-- **Trajectory buffer flush frequency (N=8):** The N=8 recommendation is derived from 20 Hz game rate and 5-15 frame token durations. If game framerate drops (GTA + training on same GPU), the staleness-variance tradeoff shifts. Monitor: if training instability appears at N=8, reduce to N=4. If variance is high, increase to N=16.
-- **Reward double-counting (Pitfall 7):** The distance_weight=0.1 may need empirical reduction to 0.01 or elimination. Cannot determine the right value without seeing actual r_edge distributions from the reward head during training. Flag for calibration in Phase 4.
-- **Encoder training loop (Phase 4):** ARCHITECTURE.md notes "auxiliary reconstruction or contrastive loss — not yet defined — needs design." The encoder is used but has no standalone training loss defined. This must be resolved before Phase 4 begins; the choice of encoder pretraining objective (reconstruction vs. contrastive vs. joint training with downstream head) affects z_t quality for all downstream modules.
+- **Embedding vocabulary sizes:** Exact cardinality of `weather`, `v_class`, `v_model`, entity `type_id`, and entity `bucket_id` must be determined by scanning real session JSONL files before writing `embedding_tables.py`. ARCHITECTURE.md provides estimates (weather ~13, v_class ~23, type_id ~5, bucket_id ~8) but these must be confirmed. This is a 10-minute scan script, not a research gap — it is the mandatory first task of Phase 1.
+- **`multi_head_attention.py` batch dimension verification:** ARCHITECTURE.md states the attention module is "batch-dimension agnostic" based on the presence of standard `nn.Linear` layers, but this has not been verified with a `[B, 32, ...]` forward pass. Add an explicit smoke test (batch=32 through the attention block) at the start of Phase 3 before the full training loop refactor.
+- **GTA VRAM footprint during simultaneous training:** The headroom estimate (3 GB for GTA, 5 GB available for training) is an upper bound. Actual GTA VRAM usage varies with scene complexity and graphics settings. Measure empirically with `torch.cuda.max_memory_allocated()` after the first backward pass. If training without GTA running (offline-only), the full 8 GB is available and batch_size up to 512 is feasible.
 
 ---
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- PyTorch 2.11.0 release notes — https://github.com/pytorch/pytorch/releases
-- PyTorch distributions (Categorical) — https://pytorch.org/docs/stable/distributions.html
-- FastAPI SSE documentation — https://fastapi.tiangolo.com/tutorial/server-sent-events/
-- Stable Baselines3 policy network conventions — https://stable-baselines3.readthedocs.io/en/master/guide/custom_policy.html
-- "Attention Is All You Need" (Vaswani et al., 2017) — multi-head attention head count conventions
-- Project source code (direct audit): `metacontroller/metacontroller.py`, `metacontroller/trainer.py`, `metacontroller/search_tree.py`, `metacontroller/frame_loop.py`, `reward_head/reward_head.py`
-- `.planning/PROJECT.md` — requirements and active flags
+
+- PyTorch AMP documentation 2.11 — `autocast`, `GradScaler`, unified API vs deprecated `torch.cuda.amp` namespace: `https://docs.pytorch.org/docs/stable/amp`
+- PyTorch AMP tutorial — `https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html`
+- NVIDIA Mixed Precision Training Guide — Tensor Core alignment requirements, bf16 architecture support matrix: `https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/index.html`
+- PyTorch DataLoader best practices — pin_memory, num_workers, prefetch: `https://medium.com/@Modexa/8-pytorch-dataloader-tactics-to-max-out-your-gpu-22270f6f3fa8`
+- PyTorch multiprocessing best practices — Windows spawn constraints for num_workers: `https://docs.pytorch.org/docs/stable/notes/multiprocessing.html`
+- Direct codebase audit — `main_model/main_model.py`, `main_model/train.py`, `reward_head/train.py`, `action_planner/train.py`, `preprocess_data.py`, `capture_states.py`, `training_utils.py`, `training_config.json`
 
 ### Secondary (MEDIUM confidence)
-- Policy Gradient Algorithms — Lil'Log (lilianweng.github.io) — REINFORCE, baseline, entropy regularization
-- Spinning Up documentation (OpenAI) — entropy coefficient scheduling
-- "Understanding the Impact of Entropy on Policy Optimization" (Ahmed et al., ICML 2019) — entropy collapse dynamics
-- "Normalization and effective learning rates in reinforcement learning" (arxiv, 2024) — LayerNorm over BatchNorm for RL
-- "Deep Policy Gradient Methods Without Batch Updates" (arxiv, 2411.15370) — on-policy constraint for trajectory buffers
-- "Subwords as Skills" NeurIPS 2024 — BPE token credit assignment
-- Set Transformer, Relational Deep RL — stacked attention encoder patterns
 
-### Tertiary (LOW confidence — needs empirical validation)
-- Specific entropy_coeff thresholds (0.05/0.02/0.005) — derived from entropy magnitude analysis, needs tuning against actual GTA reward scale
-- Trajectory buffer N=8 flush frequency — based on 20 Hz rate and token duration estimates
-- Convergence thresholds for freeze decisions — heuristics from literature, not calibrated to this specific environment
+- RTX 3070 Ti CUDA guide — 8 GB GDDR6X, Ampere sm_86, 3rd-gen Tensor Cores: `https://www.rightnowai.co/guides/gpu-comparison/rtx-3070-ti`
+- GradScaler skip logic — PyTorch source `torch/amp/grad_scaler.py`
+- CUDA memory fragmentation — `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`: `https://docs.pytorch.org/docs/stable/generated/torch.cuda.memory.empty_cache.html`
+- PyTorch Embedding for categorical data: `https://discuss.pytorch.org/t/nn-embedding-layer-in-categorical-features/148558`
+
+### Tertiary (needs empirical validation)
+
+- GTA V VRAM footprint during training — estimated 2-4 GB; must be measured at actual graphics settings in the target environment
+- Categorical vocabulary sizes — estimated from GTA domain knowledge; must be confirmed by scanning real session data before coding begins
 
 ---
-*Research completed: 2026-04-30*
+
+*Research completed: 2026-05-04*
 *Ready for roadmap: yes*

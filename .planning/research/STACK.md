@@ -1,363 +1,261 @@
 # Technology Stack
 
-**Project:** RASHKOGIE GTA — MCTS-based RL Driving Agent with Rational Cognition Metacontroller
-**Researched:** 2026-04-30
-**Context:** Brownfield — all modules exist, now completing training infrastructure and dashboard
+**Project:** RASHKOGIE GTA — v1.1 Training Optimization
+**Researched:** 2026-05-04
+**Context:** Subsequent milestone — adding compact tensor format, learned embeddings, batched GPU forward passes, and CUDA mixed precision to an existing PyTorch codebase. All core ML infrastructure from v1.0 remains unchanged.
+**Confidence:** HIGH
 
 ---
 
-## Recommended Stack
+## What This Document Covers
 
-### Core ML Framework
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| PyTorch | 2.11.0 | All tensor ops, NN definitions, autograd | Already in use; 2.11.0 is current stable as of March 2026. torch.distributions.Categorical for sampling, autograd for REINFORCE. No reason to switch. |
-| Python | 3.12 | Runtime | Already locked in. 3.12 is fully supported by PyTorch 2.11.0. |
-
-**Confidence:** HIGH — verified against PyTorch release notes (pytorch.org/pytorch/releases).
+Only the **stack additions and changes** needed for v1.1. Do not re-research the existing stack (PyTorch, FastAPI, SQLite, websockets — all locked from v1.0).
 
 ---
 
-### Policy Gradient Training (REINFORCE + Entropy Regularization)
+## Critical First Step: Install the CUDA Build
 
-**Recommendation: Pure PyTorch — no RL framework.**
+The `.venv` currently has `torch 2.11.0+cpu`. The RTX 3070 Ti is only accessible from the Windows-native Python environment, not from WSL2. `torch.cuda.is_available()` returns `False` in WSL2 regardless of torch version.
 
-The metacontroller trains via custom REINFORCE, not DQN/PPO/SAC. The trajectory structure (metalevel decisions during search, not env episodes) is too non-standard for any RL library to handle without fighting the abstractions.
-
-#### Key Implementation Decisions
-
-**1. Replace argmax with categorical sampling (highest priority fix)**
-
-```python
-# WRONG (current code — kills exploration):
-decision = decision_logits.argmax(dim=-1)
-
-# CORRECT (training):
-dist = torch.distributions.Categorical(logits=decision_logits)
-decision = dist.sample()
-log_prob = dist.log_prob(decision)
-
-# CORRECT (inference only):
-decision = decision_logits.argmax(dim=-1)
-```
-
-Use `torch.distributions.Categorical` — it is part of PyTorch core, no extra dependency.
-
-**2. Entropy regularization**
-
-```python
-dist = torch.distributions.Categorical(logits=decision_logits)
-entropy = dist.entropy()  # [batch] — maximize this
-
-# Loss:
-pg_loss = -(log_prob * advantage)
-entropy_loss = -entropy_coeff * entropy   # subtract entropy to maximize it
-loss = pg_loss + entropy_loss
-```
-
-`entropy_coeff` should start at `0.01` and be tunable from the dashboard. If the metacontroller collapses to one action (the current bug), increase to `0.05` or `0.1`. Log `entropy.mean()` every step — if it drops below `0.3` nats for a 4-way distribution, something is collapsing.
-
-**3. Penalty for not being ready**
-
-Add to meta_rewards in `compute_metalevel_advantages`:
-
-```python
-# If the token ended before metacontroller committed:
-if token_ended_without_commit:
-    meta_rewards[-1] += NOT_READY_PENALTY  # large negative, e.g. -5.0
-```
-
-**4. Penalty for lazy commits (immediate COMMIT_NEXT without searching)**
-
-```python
-if decision == COMMIT_NEXT and search_steps_taken == 0:
-    meta_rewards[-1] += LAZY_COMMIT_PENALTY  # e.g. -1.0
-```
-
-**Confidence:** HIGH — standard REINFORCE math, verified against PyTorch distributions docs.
-
----
-
-### Optimizer
-
-**Recommendation: Adam (torch.optim.Adam), lr=3e-4**
-
-Replace the current manual SGD in `update_metapolicy`. Reasons:
-
-| Criterion | Manual SGD (current) | Adam (recommended) |
-|-----------|---------------------|-------------------|
-| Non-stationary gradients in RL | Poor — fixed lr on noisy PG gradients | Good — per-parameter adaptive lr |
-| Implementation effort | Already broken (no momentum, no grad clipping) | One line |
-| Stability with sparse rewards | Poor | Good |
-| Convergence speed | Slow | ~3-5x faster on policy networks |
-
-```python
-optimizer = torch.optim.Adam(meta_mlp.parameters(), lr=3e-4, eps=1e-5)
-```
-
-Use `eps=1e-5` (slightly larger than default 1e-8) — standard for RL to prevent numerical issues on low-reward episodes.
-
-**Also add gradient clipping** (critical for REINFORCE stability):
-
-```python
-torch.nn.utils.clip_grad_norm_(meta_mlp.parameters(), max_norm=0.5)
-```
-
-Apply the same upgrade to the reward head optimizer and action planner optimizer.
-
-**Confidence:** HIGH — Adam + grad clipping is the standard across all major RL frameworks (SB3, TorchRL, CleanRL).
-
----
-
-### Replay Buffer (Batch Training Infrastructure)
-
-**Recommendation: Custom deque-based circular buffer — no extra dependency.**
-
-TorchRL's `ReplayBuffer` is the right tool in general, but adds a dependency and import overhead on a machine already running GTA V. The metacontroller's trajectory structure (variable-length metalevel rollouts, not fixed (s,a,r,s') tuples) also fits custom code better.
-
-**Implementation:**
-
-```python
-from collections import deque
-import random
-
-class MetaReplayBuffer:
-    """Circular buffer for metalevel trajectories."""
-    def __init__(self, capacity=10_000):
-        self.buffer = deque(maxlen=capacity)   # auto-evicts oldest
-
-    def push(self, trajectory_dict):
-        """Store one completed metalevel trajectory."""
-        self.buffer.append(trajectory_dict)
-
-    def sample(self, batch_size):
-        """Random batch of trajectories for batch training."""
-        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
-
-    def __len__(self):
-        return len(self.buffer)
-```
-
-`trajectory_dict` stores: `features` tensor, `decision` int, `advantage` float, `meta_return` float, `entropy` float, `step_in_trajectory` int.
-
-**Buffer size recommendation:** 10,000 trajectory steps. At ~20 Hz with average 5 metalevel steps per token, this is ~100 tokens = ~5 minutes of gameplay. Large enough for stable batches; small enough to not dominate RAM on a gaming PC.
-
-**Batch size:** 64 trajectories per update. Smaller (16-32) works fine early in training.
-
-**When to use the buffer:** The current code updates online (one step at a time). Add a secondary batch update loop: after every N online steps (e.g. N=20), sample a batch from the buffer and run one Adam step. This stabilizes training without requiring off-policy corrections (REINFORCE on a small buffer is a mild approximation, acceptable here).
-
-**Confidence:** MEDIUM — deque buffer is established pattern; the batch frequency tuning is empirical.
-
----
-
-### Training Dashboard
-
-**Recommendation: FastAPI 0.115+ with SSE + vanilla JS frontend (no React/Node required)**
-
-**Why FastAPI over Flask:**
-- Native async — the training loop runs in a background thread/process; FastAPI's async handlers + `asyncio.Queue` bridge them cleanly
-- SSE is first-class in FastAPI via `sse-starlette` — no WebSocket handshake complexity
-- Auto-generated API docs (Swagger UI) useful for the hyperparameter control panel
-
-**Dependencies:**
+**Action required:** All training scripts must run via the Windows-native Python installation (not WSL2). The `requirements.txt` already specifies `--extra-index-url https://download.pytorch.org/whl/cu124`, so reinstalling in the Windows Python venv will pull the CUDA build.
 
 ```bash
-pip install fastapi>=0.115.0 uvicorn[standard]>=0.32.0 sse-starlette>=2.1.0
+# Run from Windows cmd/PowerShell (not WSL2), inside the project venv:
+pip install "torch>=2.11.0" --index-url https://download.pytorch.org/whl/cu124
 ```
 
-**Architecture:**
+Verify with: `python -c "import torch; print(torch.cuda.is_available())"` — must print `True`.
 
-```
-Training process
-    │  pushes metrics to asyncio.Queue (thread-safe via asyncio.run_coroutine_threadsafe)
-    │
-FastAPI server (same Python process, different thread)
-    ├── GET /stream          → SSE endpoint, yields from queue
-    ├── POST /hyperparams    → update lr, entropy_coeff, think_cost etc. live
-    ├── GET /checkpoints     → list saved checkpoints
-    ├── POST /start          → start training session
-    ├── POST /stop           → stop training session
-    └── GET /                → serves the single HTML page
-
-Frontend (single HTML file, no build step)
-    ├── EventSource('/stream')  → receives metric updates
-    ├── Chart.js (CDN)          → renders loss curves, entropy, return
-    └── HTML forms              → send hyperparameter updates to /hyperparams
-```
-
-**Why Chart.js over Plotly/D3:**
-- Chart.js loads from CDN (~60KB minified), no npm, no build tool
-- Handles live streaming updates with `chart.data.datasets[0].data.push(point); chart.update('none')`
-- Sufficient for loss curves, entropy, token return per session
-
-**Why vanilla JS over React/Vue:**
-- This is a single-page tool on localhost; the complexity overhead of a JS framework is unjustified
-- No build step means no Node.js dependency on the Windows gaming PC
-
-**Dashboard panels to implement:**
-1. Loss curve (meta PG loss, reward head MSE, rf predictor MSE)
-2. Entropy per step (watch for collapse below 0.3 nats)
-3. Token return per episode (running mean)
-4. Decision distribution histogram (EXPLORE / INTERRUPT / COMMIT_NEXT / ROLLBACK counts)
-5. Hyperparameter panel: `lr`, `entropy_coeff`, `think_cost`, `not_ready_penalty`, `lazy_commit_penalty`, `batch_size`
-6. Session log table: session ID, start time, total steps, final loss, checkpoint path
-
-**Confidence:** HIGH — FastAPI SSE pattern is well-established; Chart.js streaming is documented.
+**Confidence:** HIGH — cu124 index URL is already in requirements.txt. RTX 3070 Ti is Ampere (sm_86), fully supported by CUDA 12.4+.
 
 ---
 
-### Architecture Sizing — MLPs and Attention
+## Core Technologies — New for v1.1
 
-#### Metacontroller MLP
+### 1. Mixed Precision Training: `torch.amp`
 
-Current: single hidden layer 128 units. This is insufficient for the 237-dim input.
+**Use:** `torch.amp.autocast` + `torch.amp.GradScaler`
 
-**Recommended:**
+Both are part of PyTorch core (no new package). The older `torch.cuda.amp.autocast` and `torch.cuda.amp.GradScaler` APIs are deprecated as of PyTorch 2.x and will produce warnings. Use the unified API.
 
 ```python
-meta_mlp = nn.Sequential(
-    nn.Linear(input_dim, 256),   # input_dim ≈ 237
-    nn.ReLU(),
-    nn.Linear(256, 256),
-    nn.ReLU(),
-    nn.Linear(256, 128),
-    nn.ReLU(),
-    nn.Linear(128, 4),
+# Correct API (PyTorch 2.x):
+scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+    z_t = encode_tensors(tensors_t, encoder_weights)
+    z_next_pred, _, token_embed, intuition_mlp = intuition_head(...)
+    loss = F.mse_loss(z_next_pred, z_t1_real)
+
+scaler.scale(loss).backward()
+
+# Must unscale before gradient clipping:
+scaler.unscale_(optimizer)
+clip_grad_norm_(all_params, max_grad_norm)
+
+scaler.step(optimizer)
+scaler.update()
+```
+
+**Why fp16 not bf16:** RTX 3070 Ti (Ampere sm_86) supports bf16 compute, but fp16 has higher throughput on consumer Ampere cards and is the standard for non-LLM training. bf16 eliminates the need for GradScaler (no underflow risk) but its benefit is mainly for transformers with large dynamic range. Our MLP/attention models with MSE and cross-entropy losses are stable in fp16 with GradScaler.
+
+**VRAM impact:** fp16 halves activation memory. For our model (encoder ~500K params + intuition head ~200K params), fp16 saves roughly 2-3 GB activation VRAM at batch_size=128, making the 8 GB VRAM budget comfortable.
+
+**Batch size constraint:** Batch size must be a multiple of 8 to use Tensor Cores efficiently. Use 64 or 128 for the flat training datasets (236K records each fitting in RAM after preprocessing).
+
+**GradScaler checkpointing:** Save and restore scaler state alongside optimizer state:
+
+```python
+torch.save({"scaler_state": scaler.state_dict(), ...}, ckpt_path)
+scaler.load_state_dict(ckpt["scaler_state"])
+```
+
+**Confidence:** HIGH — verified against PyTorch 2.11 AMP docs and confirmed deprecation of `torch.cuda.amp` APIs.
+
+---
+
+### 2. Compact Tensor Storage: `torch.save` with Single `.pt` File
+
+**Use:** `torch.save(dict_of_tensors, path)` — already implemented in `preprocess_data.py`.
+
+The existing `preprocess_data.py` already writes a single `.pt` file with stacked tensors (`ego_t [N,46]`, `scene_t [N,16]`, etc.). This is the correct approach.
+
+**Changes needed for v1.1:**
+- Add integer index tensors for categorical fields (`v_class_idx`, `weather_idx`, `entity_type_id`, `entity_bucket_id`) as `torch.long` rather than encoding them as floats inside the float tensors
+- Separate the categorical index columns out of `ego` and `scene` tensors during preprocessing so the encoder can route them to `nn.Embedding` layers
+
+**Inline capture format** (for new sessions, replacing JSONL write):
+
+```python
+# Write directly at capture time instead of raw JSONL:
+torch.save({
+    "ego_t": ego_tensor,        # [46] float32
+    "scene_t": scene_tensor,    # [16] float32
+    "route_t": route_tensor,    # [14] float32
+    "entities_t": ent_tensor,   # [32, 24] float32
+    "mask_t": mask_tensor,      # [32] float32
+    "v_class_idx": ...,         # [] int64
+    "weather_idx": ...,         # [] int64
+    "token_id": ...,            # [] int64
+}, f"frame_{idx:07d}.pt")
+```
+
+Alternatively, accumulate frames in-memory per session and flush a single `.pt` shard every N=10,000 frames. Single-shard approach avoids per-frame file I/O overhead and is simpler to load.
+
+**Memory-mapped loading** (`mmap=True`): Use only if the preprocessed `.pt` file exceeds available CPU RAM. For ~236K records at ~3.4 KB each, preprocessed size is ~800 MB — fits in RAM on any modern PC. Load normally with `torch.load(path, weights_only=True, map_location="cpu")`.
+
+Reserve `mmap=True` for future sessions where data exceeds 4 GB RAM.
+
+**Confidence:** HIGH — `torch.save`/`torch.load` is the standard and already in use; sizing is derived from PROJECT.md figures.
+
+---
+
+### 3. Learned Embeddings: `nn.Embedding`
+
+**Use:** `torch.nn.Embedding` — PyTorch core, no new package.
+
+Categorical fields currently treated as continuous floats (meaningless to MLP dot products):
+- `weather` — small integer (0–10 typical weather codes)
+- `v_class` — vehicle class integer (0–23 in GTA)
+- `v_model` — vehicle model hash (high-cardinality, may need hashing trick)
+- Entity `type_id` — entity type integer
+- Entity `bucket_id` — distance bucket integer
+
+**Recommended embedding dims** (rule of thumb: `min(50, (n_categories + 1) // 2)`):
+
+| Field | Cardinality | Embed Dim | Notes |
+|-------|-------------|-----------|-------|
+| `weather` | ~12 | 4 | Low cardinality; 4 dims sufficient |
+| `v_class` | 24 | 8 | GTA has 22 vehicle classes |
+| `v_model` | ~100-400 | 16 | Use hash trick if >500 unique models |
+| `entity type_id` | ~5 | 4 | Ped/vehicle/object/bike/etc. |
+| `entity bucket_id` | ~8 | 4 | Distance buckets |
+
+**Integration pattern:** Add embedding tables to `create_encoder_weights()` and concatenate their outputs to the corresponding MLP inputs.
+
+```python
+# In create_encoder_weights():
+weather_embed = nn.Embedding(num_embeddings=16, embedding_dim=4)
+v_class_embed = nn.Embedding(num_embeddings=32, embedding_dim=8)
+
+# In encode_tensors(), before ego_mlp:
+weather_emb = weather_embed(weather_idx)   # [B, 4]
+v_class_emb = v_class_embed(v_class_idx)  # [B, 8]
+ego_cat = torch.cat([ego_continuous, weather_emb, v_class_emb], dim=-1)
+ego_emb = ego_mlp(ego_cat)               # input dim grows by 12
+```
+
+This means `ego_mlp` input dim changes from 46 to `46 - (removed_cat_fields) + sum(embed_dims)`. Remove the float versions of categorical fields from the continuous tensors to avoid redundancy.
+
+**Confidence:** HIGH — `nn.Embedding` for categorical tabular features is established PyTorch pattern; cardinalities estimated from GTA domain knowledge.
+
+---
+
+### 4. Batched DataLoader: `torch.utils.data.TensorDataset` + `DataLoader`
+
+**Use:** `torch.utils.data.TensorDataset` + `torch.utils.data.DataLoader` — PyTorch core, no new package.
+
+The current training loops iterate record-by-record in Python (one `.unsqueeze(0)` call per record). Replace with native DataLoader batching.
+
+```python
+from torch.utils.data import TensorDataset, DataLoader
+
+dataset = TensorDataset(
+    pt_data["ego_t"],       # [N, 46]
+    pt_data["scene_t"],     # [N, 16]
+    pt_data["route_t"],     # [N, 14]
+    pt_data["entities_t"],  # [N, 32, 24]
+    pt_data["mask_t"],      # [N, 32]
+    pt_data["token_ids"],   # [N]
 )
+
+loader = DataLoader(
+    dataset,
+    batch_size=128,
+    shuffle=True,
+    pin_memory=True,         # async CPU→GPU transfer
+    num_workers=0,           # Windows: keep at 0 to avoid spawn issues
+    drop_last=True,          # stable batch size for Tensor Cores
+)
+
+for batch in loader:
+    ego, scene, route, entities, mask, token_ids = [x.to(device, non_blocking=True) for x in batch]
 ```
 
-Rationale:
-- 237-dim input with learned structure requires at least 2 hidden layers to form useful intermediate representations
-- Width 256 → 256 → 128 follows the "pyramid" pattern standard in SB3's default policy nets
-- 4-way output (EXPLORE / INTERRUPT / COMMIT_NEXT / ROLLBACK) is low-dimensional; the last hidden layer can shrink
-- Total parameters: ~130K — fast to forward on GPU at 20 Hz
+**Windows constraint on `num_workers`:** PyTorch multiprocessing uses `spawn` on Windows, which requires all top-level code to be guarded by `if __name__ == '__main__'`. Since training scripts may be imported as modules, `num_workers=0` is the safe default. The training bottleneck is the GPU forward pass, not data loading from an in-RAM TensorDataset, so `num_workers=0` costs nothing here.
 
-#### Encoder MLPs (ego, scene, route, entity projections)
+**`pin_memory=True`:** Enables async DMA transfers from CPU to GPU when data is not already on GPU. Safe and beneficial with CUDA. Do not use with CPU-only training.
 
-Current: 2-layer MLPs projecting to 64-dim. These are fine. Keep as-is.
+**`drop_last=True`:** Drops the final incomplete batch. Keeps batch size uniform, which matters for Tensor Core alignment (must be multiple of 8).
 
-#### Encoder Multi-Head Attention
+**Batch size recommendation:** 128 for encoder/intuition training (~800 MB dataset, 236K records). 64 for reward head training (same dataset size). Both fit comfortably in 8 GB VRAM for these model sizes.
 
-Current: 4 heads, 1 attention block, embed_dim=64.
-
-**Recommended: 4 heads, 2 stacked attention blocks**
-
-```python
-# Stack two cross-attention blocks:
-# Block 1: query=[ego|scene|route], K/V=entity_embs → entity_context_1
-# Block 2: query=[ego|scene|route|entity_context_1], K/V=entity_embs → entity_context_2
-```
-
-Rationale:
-- 32 entities × 24 features is a moderately complex set; two passes allow the query to attend conditionally (first pass: find relevant entities, second pass: refine)
-- 4 heads at embed_dim=64 means head_dim=16 — adequate for spatial relations. Do not increase heads; head_dim below 8 becomes noise.
-- Adding a third block is unlikely to help; entity relationships in driving are not deeply compositional
-
-**head_dim rule of thumb:** `embed_dim / num_heads >= 16`. At 64/4=16, we are at the minimum. If embed_dim is increased, num_heads can increase proportionally.
-
-#### Action Planner MLP
-
-Current: single hidden layer. Recommend 2 hidden layers at 256 units (same logic as metacontroller — input is concatenated z_t + z_next_pred = 256-dim).
-
-#### Reward Head MLP
-
-Already has 3 layers (input → 128 → 64 → 1). This is correct. Keep as-is.
-
-#### Intuition Head MLP
-
-Not reviewed in this pass. Similar to action planner — if single-layer, upgrade to 2 layers at 256.
-
-**Confidence:** MEDIUM — sizing is based on established heuristics (SB3 defaults, attention head_dim rule) applied to the specific input dims of this codebase. Actual optimal sizes require empirical validation.
+**Confidence:** HIGH — TensorDataset + DataLoader is the standard batched training pattern in PyTorch; Windows num_workers caveat is well-documented.
 
 ---
 
-### Checkpoint Management
+## Supporting Libraries — No Changes Needed
 
-**Recommendation: torch.save / torch.load with JSON sidecar files. No external experiment tracking service.**
+| Library | Version | Status | Notes |
+|---------|---------|--------|-------|
+| `torch` | 2.11.0+cu124 | Upgrade from +cpu | Switch to CUDA build; all v1.1 features are in core torch |
+| `numpy` | >=1.24.0 | Keep | Used in preprocessing; do not introduce new numpy dependencies in training loops |
+| `scikit-learn` | >=1.3.0 | Keep | PCA for dashboard embeddings; no changes needed |
 
-Do not use Weights & Biases, MLflow, or DVC. The project constraint is single offline Windows PC; cloud services add friction and network dependency. The custom dashboard already covers what W&B would provide.
-
-**Checkpoint format:**
-
-```python
-import json, time
-from pathlib import Path
-
-CHECKPOINT_DIR = Path("checkpoints")
-
-def save_checkpoint(session_id, step, modules, hyperparams, metrics):
-    """Save all trainable modules + metadata."""
-    ckpt_dir = CHECKPOINT_DIR / session_id / f"step_{step:06d}"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save each module independently (enables partial loading)
-    torch.save(modules["meta_mlp"].state_dict(),     ckpt_dir / "meta_mlp.pt")
-    torch.save(modules["reward_mlp"].state_dict(),   ckpt_dir / "reward_mlp.pt")
-    torch.save(modules["rf_predictor"].state_dict(), ckpt_dir / "rf_predictor.pt")
-    torch.save(modules["planner_mlp"].state_dict(),  ckpt_dir / "planner_mlp.pt")
-    torch.save(modules["encoder"].state_dict(),      ckpt_dir / "encoder.pt")
-
-    # JSON sidecar: hyperparams + metrics snapshot
-    meta = {
-        "session_id": session_id,
-        "step": step,
-        "timestamp": time.time(),
-        "hyperparams": hyperparams,
-        "metrics": metrics,
-    }
-    (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-```
-
-**Checkpoint frequency:** Every 500 steps, or on manual trigger from dashboard.
-
-**Module freeze protocol:** When a module is frozen (intuition head, reward head after convergence), save a `frozen=true` flag in the sidecar. The training loop checks this flag before running optimizer steps.
-
-**Session management:**
-- Each training run = one session ID (timestamp-based: `2026-04-30_14-23`)
-- Sessions stored under `checkpoints/<session_id>/`
-- Dashboard reads `meta.json` files to populate session history table
-
-**Confidence:** HIGH — standard PyTorch pattern; no verification needed.
+No new packages are required for v1.1. All four feature areas (AMP, compact tensors, learned embeddings, batched DataLoader) are served by existing PyTorch core APIs.
 
 ---
 
-### Supporting Libraries
+## What NOT to Add
 
-| Library | Version | Purpose | When to Use |
-|---------|---------|---------|-------------|
-| `sse-starlette` | >=2.1.0 | SSE streaming in FastAPI | Dashboard only |
-| `uvicorn[standard]` | >=0.32.0 | ASGI server for FastAPI | Dashboard only |
-| `websockets` | >=12.0 | Already in use for GTA bridge | Keep as-is |
-| `pynput` | >=1.7.6 | Already in use for input capture | Keep as-is |
-| `pytest` | >=7.0.0 | Already in use | Keep as-is |
-| `collections.deque` | stdlib | Replay buffer | No install needed |
-| `torch.distributions` | part of torch | Categorical sampling for REINFORCE | No install needed |
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| `torch.cuda.amp.GradScaler()` | Deprecated in PyTorch 2.x, produces warnings | `torch.amp.GradScaler("cuda")` |
+| `torch.cuda.amp.autocast()` | Deprecated in PyTorch 2.x | `torch.amp.autocast(device_type="cuda")` |
+| `tensordict` / `torchdata` | Adds heavy dependencies for problems already solved by TensorDataset | `torch.utils.data.TensorDataset` |
+| `num_workers > 0` on Windows | Causes EOFError with spawn multiprocessing in imported modules | `num_workers=0` (no perf cost for in-RAM datasets) |
+| `mmap=True` on torch.load | Adds disk-seek latency per access during training; only justified if data doesn't fit in RAM | Normal `torch.load()` for <4 GB datasets |
+| `torch.float16` for optimizer states | Optimizer states (Adam moments) must stay fp32 even in mixed precision | Keep optimizer in fp32; only forward pass uses fp16 |
+| Gradient checkpointing | Trades VRAM for recomputation; unnecessary for 500K-param models on 8 GB VRAM | Not needed at this model scale |
+| bf16 | Slightly less throughput than fp16 on consumer Ampere; eliminates GradScaler need but adds complexity | fp16 + GradScaler is the standard for this hardware |
 
-**Explicitly do NOT add:**
-- `stable-baselines3` — policy gradient interface incompatible with metalevel trajectory structure
-- `torchrl` — adds ~200MB dependency for features already implemented; replay buffer overkill for this scale
-- `wandb` / `mlflow` — cloud-centric; project is offline single-machine
-- `tensorboard` — custom dashboard supersedes it per PROJECT.md key decision
-- `numpy` — avoid introducing it; all tensors should stay in PyTorch to avoid CPU copies
-- `React` / `Vue` / `Node.js` — no build tools on the Windows gaming PC
+---
+
+## VRAM Budget on RTX 3070 Ti (8 GB)
+
+Approximate VRAM usage at batch_size=128 with fp16:
+
+| Component | fp32 (before) | fp16 (after) |
+|-----------|---------------|--------------|
+| Model parameters (~1M params) | ~4 MB | ~2 MB |
+| Activations at batch_size=128 | ~500 MB | ~250 MB |
+| Gradient tensors | ~4 MB | ~4 MB (kept fp32) |
+| Adam optimizer states (2 moments) | ~8 MB | ~8 MB (kept fp32) |
+| GTA V (separate process) | ~2-3 GB | ~2-3 GB |
+| **Available for training** | ~5 GB | ~5 GB |
+| **Training headroom** | Comfortable | Comfortable |
+
+These are small MLP + attention models (~1M total parameters). VRAM is not a constraint at this scale. The benefit of fp16 is throughput from Tensor Cores, not VRAM relief.
+
+**Recommended batch sizes:**
+- Encoder + intuition head training: 128
+- Reward head training: 128
+- Action planner training: 128
+- All must be multiples of 8 for Tensor Core alignment
 
 ---
 
 ## Full Installation
 
 ```bash
-# Upgrade PyTorch to current stable (if not already on 2.11+)
-pip install torch>=2.11.0 --index-url https://download.pytorch.org/whl/cu124
+# Switch from CPU to CUDA build (Windows cmd/PowerShell, inside venv):
+pip install "torch>=2.11.0" --index-url https://download.pytorch.org/whl/cu124
 
-# Dashboard server
-pip install fastapi>=0.115.0 uvicorn[standard]>=0.32.0 sse-starlette>=2.1.0
-
-# Already installed (keep versions)
-pip install websockets>=12.0 pynput>=1.7.6 pytest>=7.0.0
+# Verify CUDA:
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
-No other changes to requirements.txt needed.
+No other requirements.txt changes needed for v1.1.
 
 ---
 
@@ -365,22 +263,37 @@ No other changes to requirements.txt needed.
 
 | Category | Recommended | Alternative | Why Not |
 |----------|-------------|-------------|---------|
-| RL framework | Pure PyTorch | TorchRL, SB3 | Metalevel trajectory structure doesn't map to standard episode-based APIs |
-| Optimizer | Adam | Manual SGD (current) | SGD with fixed lr is unstable on noisy PG gradients; no momentum state |
-| Replay buffer | Custom deque | TorchRL ReplayBuffer | Adds ~200MB dep; variable-length metalevel trajectories need custom push logic anyway |
-| Dashboard server | FastAPI + SSE | Flask + SocketIO | FastAPI native async better for streaming; SocketIO adds handshake complexity |
-| Frontend | Vanilla JS + Chart.js | React + recharts | No Node/npm on gaming PC; single-page tool doesn't justify framework overhead |
-| Experiment tracking | JSON sidecars | W&B / MLflow | Offline constraint; custom dashboard already covers visualization needs |
-| Sampling | torch.distributions.Categorical | custom softmax + multinomial | Categorical is optimized, handles temperature, includes entropy() method |
+| Mixed precision | `torch.amp.autocast` + `GradScaler` | bf16 (no scaler) | fp16 higher throughput on consumer Ampere; bf16 not worth the change in training patterns |
+| Compact tensors | `torch.save` single `.pt` file | Per-frame `.pt` files, HDF5, parquet | Single file has no per-file overhead; HDF5/parquet adds heavy deps (h5py, pyarrow) for no benefit |
+| Categorical encoding | `nn.Embedding` | One-hot vectors | One-hot for 400-way v_model is 400x more memory; embeddings are differentiable and learn semantic relationships |
+| Batched loading | `TensorDataset` + `DataLoader` | Manual index slicing (current) | DataLoader handles shuffle, pin_memory, and drop_last automatically; 10x simpler |
+| Inline capture format | Accumulated shard `.pt` file | Per-frame `.pt` file | Per-frame creates thousands of small files; shard approach writes one file per N frames |
+
+---
+
+## Version Compatibility
+
+| Component | Version | Compatible With | Notes |
+|-----------|---------|-----------------|-------|
+| `torch` 2.11.0+cu124 | CUDA 12.4 | RTX 3070 Ti (sm_86) | Ampere architecture, full Tensor Core support |
+| `torch.amp.autocast` | PyTorch 2.0+ | `torch.amp.GradScaler` | Unified API; replaces deprecated `torch.cuda.amp` namespace |
+| `nn.Embedding` | All PyTorch versions | `torch.amp.autocast` | Embedding lookup is a supported autocast op; no casting issues |
+| `TensorDataset` + `DataLoader` | All PyTorch versions | `pin_memory=True` | pin_memory requires CUDA to be available; guard with `if torch.cuda.is_available()` |
 
 ---
 
 ## Sources
 
-- PyTorch 2.11.0 release: [https://github.com/pytorch/pytorch/releases](https://github.com/pytorch/pytorch/releases)
-- PyTorch distributions (Categorical): [https://pytorch.org/docs/stable/distributions.html](https://pytorch.org/docs/stable/distributions.html)
-- FastAPI SSE: [https://fastapi.tiangolo.com/tutorial/server-sent-events/](https://fastapi.tiangolo.com/tutorial/server-sent-events/)
-- TorchRL replay buffers: [https://docs.pytorch.org/rl/stable/tutorials/rb_tutorial.html](https://docs.pytorch.org/rl/stable/tutorials/rb_tutorial.html)
-- SB3 policy network defaults: [https://stable-baselines3.readthedocs.io/en/master/guide/custom_policy.html](https://stable-baselines3.readthedocs.io/en/master/guide/custom_policy.html)
-- sse-starlette PyPI: [https://pypi.org/project/fastapi-sse/](https://pypi.org/project/fastapi-sse/)
-- Adam in RL (adaptive lr for non-stationary objectives): multiple sources consistent with PyTorch optim docs
+- PyTorch AMP documentation (2.11): [https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html](https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html)
+- `torch.amp.GradScaler` unified API deprecation: [https://github.com/flairNLP/flair/pull/3682](https://github.com/flairNLP/flair/pull/3682) — confirmed `torch.cuda.amp.GradScaler` is deprecated
+- PyTorch AMP stable docs: [https://docs.pytorch.org/docs/stable/amp](https://docs.pytorch.org/docs/stable/amp)
+- DataLoader best practices (2025-2026): [https://www.progressiverobot.com/2026/02/04/pytorch-dataloader-tutorial/](https://www.progressiverobot.com/2026/02/04/pytorch-dataloader-tutorial/)
+- pin_memory explanation: [https://medium.com/data-scientists-diary/when-to-set-pin-memory-to-true-in-pytorch-75141c0f598d](https://medium.com/data-scientists-diary/when-to-set-pin-memory-to-true-in-pytorch-75141c0f598d)
+- Windows num_workers multiprocessing: [https://iamholumeedey007.medium.com/pytorch-windows-eoferror-ran-out-of-input-when-num-workers-0-4d372157512](https://iamholumeedey007.medium.com/pytorch-windows-eoferror-ran-out-of-input-when-num-workers-0-4d372157512)
+- torch.load mmap=True behavior: [https://discuss.pytorch.org/t/torch-load-should-i-just-always-use-mmap/191305](https://discuss.pytorch.org/t/torch-load-should-i-just-always-use-mmap/191305)
+- PyTorch CUDA cu124/cu126 install (Windows): [https://pytorch.org/get-started/previous-versions/](https://pytorch.org/get-started/previous-versions/)
+
+---
+
+*Stack research for: RASHKOGIE GTA v1.1 Training Optimization*
+*Researched: 2026-05-04*
