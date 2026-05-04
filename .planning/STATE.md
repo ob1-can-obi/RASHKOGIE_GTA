@@ -1,36 +1,34 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: executing
-stopped_at: context exhaustion at 76% (2026-05-02)
-last_updated: "2026-05-02T01:24:21.443Z"
-last_activity: 2026-05-01 -- Phase 05 wave 2 complete
+milestone: v1.1
+milestone_name: Training Optimization
+status: defining_requirements
+stopped_at: null
+last_updated: "2026-05-03"
+last_activity: 2026-05-03 -- Milestone v1.1 started
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 21
-  completed_plans: 21
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-30)
+See: .planning/PROJECT.md (updated 2026-05-03)
 
 **Core value:** The metacontroller must learn to search intelligently — using the tree to find better actions than the planner's top-1, while staying ready before the current token ends.
-**Current focus:** Phase 5 (Training Dashboard) — Wave 1 complete, executing Wave 2
+**Current focus:** Milestone v1.1 — Training Optimization (defining requirements)
 
 ## Current Position
 
-Phase: 5 of 5 (Training Dashboard) — Executing
-Plan: 5 of 6 in current phase (Wave 2 complete)
-Status: Executing Wave 3
-Last activity: 2026-05-01 -- Phase 05 wave 2 complete
-
-Progress: [███████████████���███░] 95%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-03 — Milestone v1.1 started
 
 ## Performance Metrics
 

@@ -15,24 +15,32 @@ The metacontroller must learn to search intelligently — using the tree to find
 - Validated GTA state streamer (C# SHVDN script + Python reader + control pipe + WebSocket bridge) — existing
 - Validated BPE tokenizer with stable IDs, session boundaries, and incremental rebuild — existing
 - Validated module architecture: encoder, intuition head, action planner, reward head, metacontroller, search tree, executor, frame loop, trainer — existing code structure
+- ✓ Metacontroller training correctness (sampling, entropy, penalties) — v1.0 Phase 1
+- ✓ Batch training + checkpointing (replay buffer, save/resume) — v1.0 Phase 2
+- ✓ Architecture upgrades (MetaMLP skip connections, dual attention, LayerNorm) — v1.0 Phase 3
+- ✓ Module training pipelines (encoder, reward, action planner, orchestrator) — v1.0 Phase 4
+- ✓ Training dashboard (live metrics, PCA embeddings, hot-reload) — v1.0 Phase 5
+
+## Current Milestone: v1.1 Training Optimization
+
+**Goal:** Make training fast, GPU-accelerated, and memory-efficient on RTX 3070 Ti (8 GB VRAM)
+
+**Target features:**
+- Inline data preprocessing during capture — write compact tensors, not bloated JSONL
+- Learned embeddings for categorical fields (weather, v_class, v_model, entity type_id/bucket_id)
+- Batched encoder forward pass — process full batches through MLPs and attention in one GPU call
+- CUDA optimization — mixed precision, proper device management, minimize CPU↔GPU transfers
+- Preprocessing tool for existing captured data
 
 ### Active
 
-- [ ] Fix metacontroller decision sampling (replace argmax with categorical sampling during training, argmax only at inference)
-- [ ] Add entropy regularization to metacontroller loss to prevent decision collapse across all 4 actions
-- [ ] Add penalty for not being ready (metacontroller fails to commit before token ends → large negative reward)
-- [ ] Add penalty for lazy commits (immediate COMMIT_NEXT without meaningful search → negative signal)
-- [ ] Determine architecture sizes: attention heads for encoder, MLP depth/width for metacontroller, action planner output heads
-- [ ] Implement batch training infrastructure (replay buffer, batch sampling, progress tracking per batch)
-- [ ] Build training data pipeline: central training_data folder structure for all modules
-- [ ] Implement intuition head training loop (automated during gameplay, MSE on z_next vs real z_{t+1})
-- [ ] Implement reward head training loop (automated during gameplay, MSE on r_edge vs realized return)
-- [ ] Implement action planner training loop (imitation learning from player driving data)
-- [ ] Freeze intuition head + reward head when converged, then train metacontroller via RL
-- [ ] Build training dashboard: custom Flask/FastAPI web app with live metrics, session history, loss curves
-- [ ] Add hyperparameter control panel to dashboard (tune params from browser, launch training runs)
-- [ ] Add training session management (session logging, batch progress, before/after comparisons)
-- [ ] Wire full end-to-end loop: data capture → train modules in order → run agent → evaluate → iterate
+- [ ] Capture pipeline writes compact tensor format instead of raw JSONL (88 GB → ~1.2 GB)
+- [ ] Preprocessing tool converts existing 88 GB JSONL captures to compact format
+- [ ] Learned embeddings for categorical fields in encoder (weather, v_class, v_model, entity type_id, bucket_id)
+- [ ] Batched encoder forward pass (all records in batch processed in one GPU call)
+- [ ] Batched training loops for all trainers (main_model, reward_head, action_planner)
+- [ ] CUDA mixed precision (fp16) training with gradient scaling
+- [ ] Minimize CPU↔GPU data transfers during training
 
 ### Out of Scope
 
@@ -75,13 +83,11 @@ GTA V → C# streamer → named pipe → Python reader → raw state dict
 7. Metacontroller — RL (REINFORCE with metalevel credit assignment) while driving in GTA
 
 **Known code issues (from audit):**
-- Metacontroller uses argmax instead of sampling → no exploration during training
-- No entropy regularization → metacontroller collapses to one decision
-- No penalty for not being ready when token ends
-- Think_cost incentivizes lazy immediate commits
-- All MLPs are single hidden layer — likely insufficient for 237-dim metacontroller input
-- No batch training — everything is online, one sample at a time
-- Single attention block in encoder — may need more
+- ✓ FIXED in v1.0: argmax, entropy, penalties, architecture, batch training
+- Categorical fields (weather, v_class, v_model, entity type_id/bucket_id) treated as continuous floats — meaningless to MLPs
+- Training data is 88 GB raw JSONL but only ~1.2 GB of useful numeric data — 74x bloat from JSON overhead and unused fields (near_vehs, near_peds, near_objects)
+- Training loops process one record at a time in Python — no GPU batching
+- ~236k records across 6 sessions (4.6 hours of driving)
 
 **Research angle:**
 Rational Cognition / Value of Cognition — the metacontroller learns WHEN to think deeper vs commit. Standard MCTS uses UCB mechanically; this agent learns that meta-decision as a policy. The tree search is not just planning — it's learned deliberation.
@@ -94,7 +100,7 @@ Rational Cognition / Value of Cognition — the metacontroller learns WHEN to th
 
 ## Constraints
 
-- **Hardware**: Single Windows PC with GPU — GTA + training share resources
+- **Hardware**: Single Windows PC with RTX 3070 Ti (8 GB VRAM) — GTA + training share resources
 - **Latency**: Agent must keep up with ~20 Hz game loop, decisions within token duration
 - **Data**: All training data comes from playing GTA — no external datasets
 - **Training order**: Modules must train in strict order due to dependencies (intuition head before reward head before action planner before metacontroller)
@@ -129,4 +135,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-30 after initialization*
+*Last updated: 2026-05-03 after milestone v1.1 start*
