@@ -45,51 +45,22 @@ for _d in ("main_model", "reward_head"):
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from main_model import create_encoder_weights, encode_state
+from main_model import create_encoder_weights, encode_state, encode_tensors
 from reward_head import reward_head, extract_reward_features, predict_reward_features, RF_DIM
 from training_utils import (
     ConvergenceDetector,
+    StreamingJSONLDataset,
     freeze_module,
+    get_device,
     load_training_config,
+    to_device,
     update_training_status,
 )
 
 
 # ---------------------------------------------------------------------------
-# JSONL data loading (T-04-07: try/except per line, skip malformed)
+# JSONL data loading -- uses StreamingJSONLDataset (lazy, RAM-safe)
 # ---------------------------------------------------------------------------
-
-def load_data(data_dir):
-    """
-    Load all JSONL records from a training data directory.
-
-    Iterates sorted .jsonl files, parses one JSON object per line.
-    Strips whitespace (handles CRLF), skips empty lines and comments.
-    Malformed lines are logged and skipped (T-04-07 mitigation).
-
-    Args:
-        data_dir: Path to directory containing .jsonl files
-
-    Returns:
-        list[dict]: Parsed training records, each with keys
-                    state_before, state_after, duration, realized_return
-    """
-    data_dir = Path(data_dir)
-    records = []
-    for path in sorted(data_dir.glob("*.jsonl")):
-        with open(path, "r", encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                try:
-                    record = json.loads(line)
-                    records.append(record)
-                except json.JSONDecodeError:
-                    logging.warning(
-                        "Skipping malformed line %d in %s", line_number, path.name
-                    )
-    return records
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +208,13 @@ def train_reward_head_offline(
     )
 
     # -----------------------------------------------------------------------
+    # Device selection (CUDA when available)
+    # -----------------------------------------------------------------------
+
+    device = get_device()
+    logging.info("Training device: %s", device)
+
+    # -----------------------------------------------------------------------
     # Initialize encoder (frozen feature extractor)
     # -----------------------------------------------------------------------
 
@@ -264,11 +242,13 @@ def train_reward_head_offline(
     # Initialize reward modules via dummy forward pass (lazy init pattern)
     # -----------------------------------------------------------------------
 
+    to_device(encoder_weights, device)
+
     _dummy_state = {
         "near_entities": [], "near_vehs": [], "near_peds": [], "near_objects": [],
     }
     _dummy_z = encode_state(_dummy_state, encoder_weights).detach()
-    _dummy_rf = extract_reward_features(_dummy_state)
+    _dummy_rf = extract_reward_features(_dummy_state).to(device)
     _dummy_delta = torch.zeros_like(_dummy_z)
     fused_dim = _dummy_z.shape[-1]
 
@@ -282,8 +262,8 @@ def train_reward_head_offline(
     )
 
     # Initialize reward_mlp
-    _dummy_duration = torch.tensor([[1.0]], dtype=torch.float32)
-    _dummy_time_left = torch.tensor([[0.0]], dtype=torch.float32)
+    _dummy_duration = torch.tensor([[1.0]], dtype=torch.float32, device=device)
+    _dummy_time_left = torch.tensor([[0.0]], dtype=torch.float32, device=device)
     _, reward_mlp = reward_head(
         z_parent=_dummy_z,
         z_child=_dummy_z,
@@ -294,6 +274,9 @@ def train_reward_head_offline(
         reward_mlp=None,
         fused_dim=fused_dim,
     )
+
+    reward_mlp = reward_mlp.to(device)
+    rf_predictor = rf_predictor.to(device)
 
     # -----------------------------------------------------------------------
     # Optimizer (reward_mlp + rf_predictor only, NOT encoder)
@@ -314,15 +297,26 @@ def train_reward_head_offline(
     )
 
     # -----------------------------------------------------------------------
-    # Load data
+    # Load data — preprocessed .pt (fast, fits in RAM) or streaming JSONL
     # -----------------------------------------------------------------------
 
-    records = load_data(data_dir)
-    if not records:
+    preprocessed_path = data_dir / "preprocessed.pt"
+    use_preprocessed = preprocessed_path.exists()
+
+    if use_preprocessed:
+        logging.info("Loading preprocessed data from %s", preprocessed_path)
+        pt_data = torch.load(preprocessed_path, weights_only=True, map_location="cpu")
+        num_records = pt_data["durations"].shape[0]
+        logging.info("Loaded %d preprocessed records", num_records)
+    else:
+        logging.info("No preprocessed.pt found — using streaming JSONL (slow)")
+        logging.info("Run 'python preprocess_data.py --module reward' first for faster training")
+        dataset = StreamingJSONLDataset(data_dir)
+        num_records = len(dataset)
+
+    if num_records == 0:
         logging.warning("No training records found in %s", data_dir)
         return {"converged": False, "final_mse": None, "total_steps": 0}
-
-    logging.info("Loaded %d training records from %s", len(records), data_dir)
 
     # -----------------------------------------------------------------------
     # Resume from checkpoint if requested
@@ -333,6 +327,8 @@ def train_reward_head_offline(
         step_count = load_reward_checkpoint(
             resume_from, reward_mlp, rf_predictor, optimizer
         )
+        reward_mlp = reward_mlp.to(device)
+        rf_predictor = rf_predictor.to(device)
         logging.info("Resumed from checkpoint at step %d", step_count)
 
     # -----------------------------------------------------------------------
@@ -350,26 +346,40 @@ def train_reward_head_offline(
     eval_every = config["eval_every_n_steps"]
 
     for epoch in range(max_epochs):
-        random.shuffle(records)
+        indices = list(range(num_records))
+        random.shuffle(indices)
 
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
+        for i in range(0, num_records, batch_size):
+            batch_indices = indices[i : i + batch_size]
             optimizer.zero_grad()
-            total_loss = torch.tensor(0.0)
+            total_loss = torch.tensor(0.0, device=device)
 
-            for record in batch:
-                state_before = record["state_before"]
-                state_after = record["state_after"]
-                duration = record["duration"]
-                realized_return = record["realized_return"]
-
-                # CRITICAL: Encoder outputs DETACHED per Pitfall 2
-                # Encoder is used as frozen feature extractor -- no gradient updates
-                z_parent = encode_state(state_before, encoder_weights).detach()
-                z_child = encode_state(state_after, encoder_weights).detach()
-
-                rf_parent = extract_reward_features(state_before)
-                rf_child_real = extract_reward_features(state_after)
+            for idx in batch_indices:
+                if use_preprocessed:
+                    def _tensors(prefix):
+                        return {
+                            "ego": pt_data[f"ego_{prefix}"][idx].unsqueeze(0).to(device),
+                            "scene": pt_data[f"scene_{prefix}"][idx].unsqueeze(0).to(device),
+                            "route": pt_data[f"route_{prefix}"][idx].unsqueeze(0).to(device),
+                            "entities": pt_data[f"entities_{prefix}"][idx].unsqueeze(0).to(device),
+                            "mask": pt_data[f"mask_{prefix}"][idx].unsqueeze(0).to(device),
+                        }
+                    z_parent = encode_tensors(_tensors("before"), encoder_weights).detach()
+                    z_child = encode_tensors(_tensors("after"), encoder_weights).detach()
+                    rf_parent = pt_data["rf_before"][idx].unsqueeze(0).to(device)
+                    rf_child_real = pt_data["rf_after"][idx].unsqueeze(0).to(device)
+                    duration = pt_data["durations"][idx].item()
+                    realized_return = pt_data["returns"][idx].item()
+                else:
+                    record = dataset[idx]
+                    state_before = record["state_before"]
+                    state_after = record["state_after"]
+                    duration = record["duration"]
+                    realized_return = record["realized_return"]
+                    z_parent = encode_state(state_before, encoder_weights).detach()
+                    z_child = encode_state(state_after, encoder_weights).detach()
+                    rf_parent = extract_reward_features(state_before).to(device)
+                    rf_child_real = extract_reward_features(state_after).to(device)
 
                 current_fused_dim = z_parent.shape[-1]
                 delta_z = z_child - z_parent
@@ -384,8 +394,8 @@ def train_reward_head_offline(
                 )
 
                 # Predict reward
-                duration_t = torch.tensor([[float(duration)]], dtype=torch.float32)
-                time_left_t = torch.tensor([[0.0]], dtype=torch.float32)
+                duration_t = torch.tensor([[float(duration)]], dtype=torch.float32, device=device)
+                time_left_t = torch.tensor([[0.0]], dtype=torch.float32, device=device)
 
                 r_pred, reward_mlp = reward_head(
                     z_parent=z_parent,
@@ -399,13 +409,13 @@ def train_reward_head_offline(
                 )
 
                 # Combined loss (matching trainer.py lines 549-560)
-                target_return = torch.tensor([[realized_return]], dtype=torch.float32)
+                target_return = torch.tensor([[realized_return]], dtype=torch.float32, device=device)
                 reward_loss = (r_pred - target_return) ** 2
                 rf_loss = ((rf_child_pred - rf_child_real.detach()) ** 2).mean()
                 total_loss = total_loss + reward_loss + rf_loss
 
             # Batch-mean loss
-            total_loss = total_loss / len(batch)
+            total_loss = total_loss / len(batch_indices)
             total_loss.backward()
 
             all_params = list(reward_mlp.parameters()) + list(rf_predictor.parameters())

@@ -182,3 +182,85 @@ def _minimal_state(wp_dist=10.0):
         "wp_dist": wp_dist, "hp": 100.0, "v_engine_hp": 1000.0,
         "v_body_hp": 1000.0, "road_dist": 0.5, "dead": False,
     }
+
+
+if __name__ == "__main__":
+    import argparse
+    import queue
+    import time
+    import signal
+
+    sys.path.insert(0, str(_ROOT / "gta_stream"))
+    from game_state_reader import GameStateReader
+
+    parser = argparse.ArgumentParser(
+        description="Capture GTA V states for encoder+intuition and reward head training"
+    )
+    parser.add_argument(
+        "--token-interval", type=int, default=30,
+        help="Frames per token boundary for reward data (default: 30)",
+    )
+    args = parser.parse_args()
+
+    token_interval = args.token_interval
+
+    print(f"Starting state capture (token interval: {token_interval} frames)")
+    print("Waiting for GTA V pipe connection...")
+
+    reader = GameStateReader().start()
+    session = StateCaptureSession(project_root=_ROOT)
+
+    print(f"Session: {session.session_ts}")
+    print(f"Encoder data -> {session.encoder_dir}")
+    print(f"Reward data  -> {session.reward_dir}")
+    print("Press Ctrl+C to stop.\n")
+
+    token_id = 0
+    frames_in_token = 0
+    last_report = time.time()
+    report_interval = 10.0
+
+    def _shutdown(sig, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        while True:
+            try:
+                state = reader.get(timeout=5.0)
+            except queue.Empty:
+                continue
+
+            raw = state.raw
+            token_started = (frames_in_token == 0)
+            frames_in_token += 1
+            token_ended = (frames_in_token >= token_interval)
+
+            session.record_frame(
+                raw, token_id,
+                token_started=token_started,
+                token_ended=token_ended,
+            )
+
+            if token_ended:
+                token_id += 1
+                frames_in_token = 0
+
+            now = time.time()
+            if now - last_report >= report_interval:
+                last_report = now
+                print(
+                    f"  frames={session.frame_idx}  "
+                    f"tokens={token_id}  "
+                    f"reader={reader.stats}"
+                )
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        session.close()
+        reader.stop()
+        print(f"\nCapture stopped. {session.frame_idx} frames, {token_id} tokens recorded.")
+        print(f"  Encoder: {session.encoder_dir / f'session_{session.session_ts}.jsonl'}")
+        print(f"  Reward:  {session.reward_dir / f'session_{session.session_ts}.jsonl'}")

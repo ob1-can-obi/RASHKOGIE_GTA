@@ -51,73 +51,17 @@ from intuition_head import intuition_head
 from action_planner import action_planner
 from training_utils import (
     ConvergenceDetector,
+    StreamingJSONLDataset,
+    get_device,
     load_training_config,
+    to_device,
     update_training_status,
 )
 
 
 # ---------------------------------------------------------------------------
-# JSONL data loading (T-04-10: try/except per line, skip malformed)
+# JSONL data loading -- uses StreamingJSONLDataset (lazy, RAM-safe)
 # ---------------------------------------------------------------------------
-
-def load_data(data_dir):
-    """
-    Load all JSONL records from a training data directory.
-
-    Iterates sorted .jsonl files, parses one JSON object per line.
-    Strips whitespace (handles CRLF), skips empty lines and comments.
-    Malformed lines are logged and skipped (T-04-10 mitigation).
-
-    Args:
-        data_dir: Path to directory containing .jsonl files
-
-    Returns:
-        list[dict]: Parsed training records, each with keys
-                    state, token_id, session_ts, frame_idx
-    """
-    data_dir = Path(data_dir)
-    records = []
-    for path in sorted(data_dir.glob("*.jsonl")):
-        with open(path, "r", encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                try:
-                    record = json.loads(line)
-                    records.append(record)
-                except json.JSONDecodeError:
-                    logging.warning(
-                        "Skipping malformed line %d in %s", line_number, path.name
-                    )
-    return records
-
-
-# ---------------------------------------------------------------------------
-# Preprocessing (Pitfall 4: filter records without token_id)
-# ---------------------------------------------------------------------------
-
-def preprocess_data(records):
-    """
-    Filter out records where token_id is None (raw captures not yet tokenized).
-
-    Per Pitfall 4 and D-06: capture mode saves raw states + player_controls.
-    Preprocessing converts player_controls to token_id. Records where
-    token_id is still None have not been tokenized and must be skipped.
-
-    Args:
-        records: List of dicts from load_data()
-
-    Returns:
-        list[dict]: Filtered records where token_id is a valid integer
-    """
-    filtered = [r for r in records if r.get("token_id") is not None]
-    removed = len(records) - len(filtered)
-    if removed > 0:
-        logging.warning(
-            "Filtered %d records with token_id=None (not yet tokenized)", removed
-        )
-    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -255,10 +199,18 @@ def train_action_planner_imitation(
     )
 
     # -----------------------------------------------------------------------
+    # Device selection (CUDA when available)
+    # -----------------------------------------------------------------------
+
+    device = get_device()
+    logging.info("Training device: %s", device)
+
+    # -----------------------------------------------------------------------
     # Initialize encoder (frozen feature extractor)
     # -----------------------------------------------------------------------
 
     encoder_weights = create_encoder_weights()
+    to_device(encoder_weights, device)
 
     # If encoder checkpoint is provided, load pre-trained encoder weights
     if encoder_checkpoint is not None:
@@ -282,11 +234,13 @@ def train_action_planner_imitation(
     # Initialize intuition head via dummy forward pass (lazy init pattern)
     # -----------------------------------------------------------------------
 
-    _dummy_z = torch.randn(1, 128)
-    _dummy_token = torch.tensor([0])
+    _dummy_z = torch.randn(1, 128, device=device)
+    _dummy_token = torch.tensor([0], device=device)
     _, _, token_embed, intuition_mlp = intuition_head(
         _dummy_z, _dummy_token, vocab_size
     )
+    token_embed = token_embed.to(device)
+    intuition_mlp = intuition_mlp.to(device)
 
     # If intuition checkpoint is provided, load pre-trained weights
     if intuition_checkpoint is not None:
@@ -321,7 +275,7 @@ def train_action_planner_imitation(
     result = action_planner(
         _dummy_z.detach(), _dummy_z.detach(), vocab_size
     )
-    planner_mlp = result["planner_mlp"]
+    planner_mlp = result["planner_mlp"].to(device)
 
     # -----------------------------------------------------------------------
     # Optimizer (planner_mlp params ONLY -- encoder + intuition are frozen)
@@ -344,19 +298,12 @@ def train_action_planner_imitation(
     # Load and preprocess data
     # -----------------------------------------------------------------------
 
-    records = load_data(data_dir)
-    if not records:
-        logging.warning("No training records found in %s", data_dir)
-        return {"converged": False, "final_accuracy": None, "total_steps": 0}
-
-    records = preprocess_data(records)
-    if not records:
-        logging.warning("No valid records after preprocessing (all token_id=None)")
-        return {"converged": False, "final_accuracy": None, "total_steps": 0}
-
-    logging.info(
-        "Loaded %d valid training records from %s", len(records), data_dir
+    dataset = StreamingJSONLDataset(
+        data_dir, filter_fn=lambda r: r.get("token_id") is not None
     )
+    if len(dataset) == 0:
+        logging.warning("No valid training records found in %s", data_dir)
+        return {"converged": False, "final_accuracy": None, "total_steps": 0}
 
     # -----------------------------------------------------------------------
     # Resume from checkpoint if requested
@@ -365,6 +312,7 @@ def train_action_planner_imitation(
     step_count = 0
     if resume_from is not None:
         step_count = load_planner_checkpoint(resume_from, planner_mlp, optimizer)
+        planner_mlp = planner_mlp.to(device)
         logging.info("Resumed from checkpoint at step %d", step_count)
 
     # -----------------------------------------------------------------------
@@ -380,16 +328,19 @@ def train_action_planner_imitation(
     batch_size = config["batch_size"]
     max_grad_norm = config["max_grad_norm"]
     eval_every = config["eval_every_n_steps"]
+    num_records = len(dataset)
 
     for epoch in range(max_epochs):
-        random.shuffle(records)
+        indices = list(range(num_records))
+        random.shuffle(indices)
         epoch_correct = 0
         epoch_total = 0
 
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
+        for i in range(0, num_records, batch_size):
+            batch_indices = indices[i : i + batch_size]
+            batch = [dataset[idx] for idx in batch_indices]
             optimizer.zero_grad()
-            total_loss = torch.tensor(0.0)
+            total_loss = torch.tensor(0.0, device=device)
             batch_correct = 0
 
             for record in batch:
@@ -400,7 +351,7 @@ def train_action_planner_imitation(
                 with torch.no_grad():
                     z_t = encode_state(state, encoder_weights)
                     # Use token_id=0 (idle) as prev_token for intuition head
-                    prev_token = torch.tensor([0])
+                    prev_token = torch.tensor([0], device=device)
                     z_next_pred, _, token_embed, intuition_mlp = intuition_head(
                         z_t, prev_token, vocab_size,
                         token_embed=token_embed, intuition_mlp=intuition_mlp,
@@ -415,7 +366,7 @@ def train_action_planner_imitation(
                 logits = result["logits"]  # [1, vocab_size]
 
                 # Cross-entropy loss against player token label
-                target = torch.tensor([target_token_id], dtype=torch.long)
+                target = torch.tensor([target_token_id], dtype=torch.long, device=device)
                 loss = F.cross_entropy(logits, target)
                 total_loss = total_loss + loss
 

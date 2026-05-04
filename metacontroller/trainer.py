@@ -291,6 +291,8 @@ def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3, entropy_co
     Output:
     - total_loss: float, sum of per-step policy + entropy losses (for logging)
     """
+    # Infer device from model parameters
+    device = next(meta_mlp.parameters()).device
 
     # -----------------------------------------------------------------
     # TRAIN-05: advantage normalization (zero-mean, unit-variance)
@@ -311,16 +313,16 @@ def update_metapolicy(meta_mlp, meta_trajectory, advantages, lr=1e-3, entropy_co
     # -----------------------------------------------------------------
 
     step_losses = []
-    entropy_sum = torch.tensor(0.0)
+    entropy_sum = torch.tensor(0.0, device=device)
 
     for step, advantage in zip(meta_trajectory, advantages):
         features = step["features"]    # [1, fused_dim + 6] -- rerun to get live graph
         decision = step["decision"]    # int
 
-        logits    = meta_mlp(features)                        # [1, 4]
+        logits    = meta_mlp(features)                                    # [1, 4]
         dist      = Categorical(logits=logits)
-        log_prob  = dist.log_prob(torch.tensor(decision))     # scalar
-        entropy   = dist.entropy()                            # scalar
+        log_prob  = dist.log_prob(torch.tensor(decision, device=device))  # scalar
+        entropy   = dist.entropy()                                        # scalar
 
         # policy gradient loss: -log_prob * advantage (REINFORCE)
         step_losses.append(-(log_prob * advantage))
@@ -500,22 +502,23 @@ def train_reward_head(
     z_parent = encode_fn(state_before).detach()  # [1, fused_dim]
     z_child  = encode_fn(state_after).detach()  # [1, fused_dim]
 
+    device = z_parent.device
     fused_dim = z_parent.shape[-1]
 
     # -------------------------------------------------------------------------
     # Step 2: extract real reward features from both states
     # -------------------------------------------------------------------------
 
-    rf_parent = extract_reward_features(state_before)   # [1, RF_DIM]
-    rf_child  = extract_reward_features(state_after)    # [1, RF_DIM]  (real, not predicted)
+    rf_parent = extract_reward_features(state_before).to(device)   # [1, RF_DIM]
+    rf_child  = extract_reward_features(state_after).to(device)    # [1, RF_DIM]  (real, not predicted)
 
     # -------------------------------------------------------------------------
     # Step 3: build duration and time_left tensors
     # token is already done so time_left = 0
     # -------------------------------------------------------------------------
 
-    duration_t  = torch.tensor([[float(duration)]], dtype=torch.float32)
-    time_left_t = torch.tensor([[0.0]],             dtype=torch.float32)
+    duration_t  = torch.tensor([[float(duration)]], dtype=torch.float32, device=device)
+    time_left_t = torch.tensor([[0.0]],             dtype=torch.float32, device=device)
 
     # -------------------------------------------------------------------------
     # Step 4: forward pass through reward head with real rf_child
@@ -556,7 +559,7 @@ def train_reward_head(
     # rf_predictor loss: predicted rf vs real rf_child
     # -------------------------------------------------------------------------
 
-    target_return = torch.tensor([[token_return]], dtype=torch.float32)
+    target_return = torch.tensor([[token_return]], dtype=torch.float32, device=device)
     reward_loss   = (r_pred - target_return) ** 2
 
     rf_loss = ((rf_pred - rf_child.detach()) ** 2).mean()
@@ -626,7 +629,9 @@ class TrainingState:
         batch_size=DEFAULT_BATCH_SIZE,
         buffer_capacity=DEFAULT_BUFFER_CAPACITY,
         jsonl_dir=None,
+        device=None,
     ):
+        self.device = device if device is not None else next(meta_mlp.parameters()).device
         self.lr = lr
         self.eps = eps
         self.max_grad_norm = max_grad_norm
@@ -778,7 +783,7 @@ class TrainingState:
 
         self.optimizer_meta.zero_grad()
 
-        total_loss = torch.tensor(0.0)
+        total_loss = torch.tensor(0.0, device=self.device)
         total_steps = 0
 
         for meta_traj, advantages in normalized_trajectories:
@@ -788,7 +793,7 @@ class TrainingState:
 
                 logits = meta_mlp(features)
                 dist = Categorical(logits=logits)
-                log_prob = dist.log_prob(torch.tensor(decision))
+                log_prob = dist.log_prob(torch.tensor(decision, device=self.device))
                 entropy = dist.entropy()
 
                 step_loss = -(log_prob * advantage)
@@ -897,8 +902,8 @@ class TrainingState:
 
         self.optimizer_reward.zero_grad()
 
-        total_reward_loss = torch.tensor(0.0)
-        total_rf_loss = torch.tensor(0.0)
+        total_reward_loss = torch.tensor(0.0, device=self.device)
+        total_rf_loss = torch.tensor(0.0, device=self.device)
 
         for traj_dict in batch:
             rollout = traj_dict["rollout"]
@@ -915,12 +920,12 @@ class TrainingState:
             fused_dim = z_parent.shape[-1]
 
             # Extract real reward features
-            rf_parent = extract_reward_features(state_before)
-            rf_child = extract_reward_features(state_after)
+            rf_parent = extract_reward_features(state_before).to(self.device)
+            rf_child = extract_reward_features(state_after).to(self.device)
 
             # Build duration and time_left tensors
-            duration_t = torch.tensor([[float(duration)]], dtype=torch.float32)
-            time_left_t = torch.tensor([[0.0]], dtype=torch.float32)
+            duration_t = torch.tensor([[float(duration)]], dtype=torch.float32, device=self.device)
+            time_left_t = torch.tensor([[0.0]], dtype=torch.float32, device=self.device)
 
             # Forward pass through reward head
             r_pred, reward_mlp = reward_head(
@@ -947,7 +952,7 @@ class TrainingState:
             )
 
             # Losses
-            target_return = torch.tensor([[token_return]], dtype=torch.float32)
+            target_return = torch.tensor([[token_return]], dtype=torch.float32, device=self.device)
             reward_loss = (r_pred - target_return) ** 2
             rf_loss = ((rf_pred - rf_child.detach()) ** 2).mean()
 

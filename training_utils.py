@@ -9,8 +9,97 @@ Exports:
 """
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
+
+import torch
+from torch.utils.data import Dataset
+
+
+# ---------------------------------------------------------------------------
+# Device selection (CUDA when available)
+# ---------------------------------------------------------------------------
+
+def get_device():
+    """Return the best available torch device (CUDA > CPU)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def to_device(module, device):
+    """Move an nn.Module or encoder_weights dict to the specified device."""
+    if isinstance(module, dict):
+        for key, value in module.items():
+            if hasattr(value, "to"):
+                module[key] = value.to(device)
+        return module
+    elif hasattr(module, "to"):
+        return module.to(device)
+    return module
+
+
+# ---------------------------------------------------------------------------
+# StreamingJSONLDataset -- lazy-loading dataset for large JSONL training data
+# ---------------------------------------------------------------------------
+
+class StreamingJSONLDataset(Dataset):
+    """Random-access dataset over JSONL files without loading all data into RAM.
+
+    On init, scans all .jsonl files to build an index of (file_path, byte_offset)
+    per valid line. This index is small (~16 bytes per record). Individual records
+    are read from disk on __getitem__ via seek.
+
+    Args:
+        data_dir: Directory containing .jsonl files
+        filter_fn: Optional callable(dict) -> bool. If provided, only records
+                   where filter_fn returns True are indexed. The record is parsed
+                   during indexing to evaluate the filter, but not kept in RAM.
+    """
+
+    def __init__(self, data_dir, filter_fn=None):
+        self.index = []  # list of (file_path, byte_offset)
+        data_dir = Path(data_dir)
+        skipped = 0
+        filtered = 0
+        for path in sorted(data_dir.glob("*.jsonl")):
+            path_str = str(path)
+            with open(path, "r", encoding="utf-8") as f:
+                while True:
+                    offset = f.tell()
+                    line = f.readline()
+                    if not line:
+                        break
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    # Validate it's parseable JSON before indexing
+                    try:
+                        record = json.loads(stripped)
+                        if filter_fn and not filter_fn(record):
+                            filtered += 1
+                            continue
+                        self.index.append((path_str, offset))
+                    except json.JSONDecodeError:
+                        skipped += 1
+        if skipped:
+            logging.warning("StreamingJSONLDataset: skipped %d malformed lines", skipped)
+        if filtered:
+            logging.warning("StreamingJSONLDataset: filtered out %d records", filtered)
+        logging.info(
+            "StreamingJSONLDataset: indexed %d records from %s", len(self.index), data_dir
+        )
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        path_str, offset = self.index[idx]
+        with open(path_str, "r", encoding="utf-8") as f:
+            f.seek(offset)
+            line = f.readline()
+        return json.loads(line.strip())
 
 
 # ---------------------------------------------------------------------------

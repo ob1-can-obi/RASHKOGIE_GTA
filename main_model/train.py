@@ -47,51 +47,22 @@ for _d in ("main_model", "intuition_head"):
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from main_model import create_encoder_weights, encode_state
+from main_model import create_encoder_weights, encode_state, encode_tensors
 from intuition_head import intuition_head
 from training_utils import (
     ConvergenceDetector,
+    StreamingJSONLDataset,
     freeze_module,
+    get_device,
     load_training_config,
+    to_device,
     update_training_status,
 )
 
 
 # ---------------------------------------------------------------------------
-# JSONL data loading (T-04-04: try/except per line, skip malformed)
+# JSONL data loading -- uses StreamingJSONLDataset (lazy, RAM-safe)
 # ---------------------------------------------------------------------------
-
-def load_data(data_dir):
-    """
-    Load all JSONL records from a training data directory.
-
-    Iterates sorted .jsonl files, parses one JSON object per line.
-    Strips whitespace (handles CRLF), skips empty lines and comments.
-    Malformed lines are logged and skipped (T-04-04 mitigation).
-
-    Args:
-        data_dir: Path to directory containing .jsonl files
-
-    Returns:
-        list[dict]: Parsed training records, each with keys
-                    state_t, state_t1, token_id, session_ts, frame_idx
-    """
-    data_dir = Path(data_dir)
-    records = []
-    for path in sorted(data_dir.glob("*.jsonl")):
-        with open(path, "r", encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                try:
-                    record = json.loads(line)
-                    records.append(record)
-                except json.JSONDecodeError:
-                    logging.warning(
-                        "Skipping malformed line %d in %s", line_number, path.name
-                    )
-    return records
 
 
 # ---------------------------------------------------------------------------
@@ -370,18 +341,28 @@ def train_encoder_intuition(
     )
 
     # -----------------------------------------------------------------------
+    # Device selection (CUDA when available)
+    # -----------------------------------------------------------------------
+
+    device = get_device()
+    logging.info("Training device: %s", device)
+
+    # -----------------------------------------------------------------------
     # Initialize modules
     # -----------------------------------------------------------------------
 
     # Create encoder weights
     encoder_weights = create_encoder_weights()
+    to_device(encoder_weights, device)
 
     # Initialize intuition head by calling once to create token_embed and intuition_mlp
-    _dummy_z = torch.randn(1, 128)
-    _dummy_token = torch.tensor([0])
+    _dummy_z = torch.randn(1, 128, device=device)
+    _dummy_token = torch.tensor([0], device=device)
     _, _, token_embed, intuition_mlp = intuition_head(
         _dummy_z, _dummy_token, vocab_size
     )
+    token_embed = token_embed.to(device)
+    intuition_mlp = intuition_mlp.to(device)
 
     # -----------------------------------------------------------------------
     # Collect all trainable parameters from both modules
@@ -412,15 +393,26 @@ def train_encoder_intuition(
     )
 
     # -----------------------------------------------------------------------
-    # Load data
+    # Load data — preprocessed .pt (fast, fits in RAM) or streaming JSONL
     # -----------------------------------------------------------------------
 
-    records = load_data(data_dir)
-    if not records:
+    preprocessed_path = data_dir / "preprocessed.pt"
+    use_preprocessed = preprocessed_path.exists()
+
+    if use_preprocessed:
+        logging.info("Loading preprocessed data from %s", preprocessed_path)
+        pt_data = torch.load(preprocessed_path, weights_only=True, map_location="cpu")
+        num_records = pt_data["token_ids"].shape[0]
+        logging.info("Loaded %d preprocessed records", num_records)
+    else:
+        logging.info("No preprocessed.pt found — using streaming JSONL (slow)")
+        logging.info("Run 'python preprocess_data.py --module main' first for faster training")
+        dataset = StreamingJSONLDataset(data_dir)
+        num_records = len(dataset)
+
+    if num_records == 0:
         logging.warning("No training records found in %s", data_dir)
         return {"converged": False, "final_mse": None, "total_steps": 0}
-
-    logging.info("Loaded %d training records from %s", len(records), data_dir)
 
     # -----------------------------------------------------------------------
     # Resume from checkpoint if requested
@@ -431,6 +423,10 @@ def train_encoder_intuition(
         step_count = load_training_checkpoint(
             resume_from, encoder_weights, intuition_mlp, token_embed, optimizer
         )
+        # Re-place on device after loading (checkpoint loads to CPU)
+        to_device(encoder_weights, device)
+        intuition_mlp = intuition_mlp.to(device)
+        token_embed = token_embed.to(device)
         logging.info("Resumed from checkpoint at step %d", step_count)
 
     # -----------------------------------------------------------------------
@@ -469,10 +465,11 @@ def train_encoder_intuition(
     eval_every = config["eval_every_n_steps"]
 
     for epoch in range(max_epochs):
-        random.shuffle(records)
+        indices = list(range(num_records))
+        random.shuffle(indices)
 
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
+        for i in range(0, num_records, batch_size):
+            batch_indices = indices[i : i + batch_size]
             optimizer.zero_grad()
 
             # Apply any pending hot-reload params (D-06)
@@ -483,19 +480,35 @@ def train_encoder_intuition(
                     batch_size = new_bs
                     logging.info("Hot-reload: batch_size updated to %d", batch_size)
 
-            total_loss = torch.tensor(0.0)
+            total_loss = torch.tensor(0.0, device=device)
 
-            for record in batch:
-                state_t = record["state_t"]
-                state_t1 = record["state_t1"]
-                token_id = record["token_id"]
+            for idx in batch_indices:
+                if use_preprocessed:
+                    # Feed pre-built tensors directly through encoder MLPs
+                    tensors_t = {
+                        "ego": pt_data["ego_t"][idx].unsqueeze(0).to(device),
+                        "scene": pt_data["scene_t"][idx].unsqueeze(0).to(device),
+                        "route": pt_data["route_t"][idx].unsqueeze(0).to(device),
+                        "entities": pt_data["entities_t"][idx].unsqueeze(0).to(device),
+                        "mask": pt_data["mask_t"][idx].unsqueeze(0).to(device),
+                    }
+                    tensors_t1 = {
+                        "ego": pt_data["ego_t1"][idx].unsqueeze(0).to(device),
+                        "scene": pt_data["scene_t1"][idx].unsqueeze(0).to(device),
+                        "route": pt_data["route_t1"][idx].unsqueeze(0).to(device),
+                        "entities": pt_data["entities_t1"][idx].unsqueeze(0).to(device),
+                        "mask": pt_data["mask_t1"][idx].unsqueeze(0).to(device),
+                    }
+                    z_t = encode_tensors(tensors_t, encoder_weights)
+                    z_t1_real = encode_tensors(tensors_t1, encoder_weights)
+                    token_id = pt_data["token_ids"][idx].item()
+                else:
+                    record = dataset[idx]
+                    z_t = encode_state(record["state_t"], encoder_weights)
+                    z_t1_real = encode_state(record["state_t1"], encoder_weights)
+                    token_id = record["token_id"]
 
-                # CRITICAL: Both z_t and z_t1_real computed WITH gradients
-                # per D-02 and Pitfall 1 -- do NOT detach z_t1_real
-                z_t = encode_state(state_t, encoder_weights)  # [1, 128]
-                z_t1_real = encode_state(state_t1, encoder_weights)  # [1, 128] WITH grad
-
-                prev_token = torch.tensor([token_id])
+                prev_token = torch.tensor([token_id], device=device)
                 z_next_pred, _, token_embed, intuition_mlp = intuition_head(
                     z_t,
                     prev_token,
@@ -508,7 +521,7 @@ def train_encoder_intuition(
                 total_loss = total_loss + loss
 
             # Batch-mean loss
-            total_loss = total_loss / len(batch)
+            total_loss = total_loss / len(batch_indices)
             total_loss.backward()
             grad_norm = clip_grad_norm_(all_params, max_grad_norm)
             clipped = bool(grad_norm.item() > max_grad_norm)

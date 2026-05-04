@@ -27,5 +27,14 @@ logs/
 
 # Claude
 .claude/
-.planning/
 dashboard/frontend/node_modules/
+
+# Training data (too large for git)
+main_model/training_data/
+reward_head/training_data/
+action_planner/training_data/
+
+# Dashboard runtime DB
+dashboard/training.db
+dashboard/training.db-shm
+dashboard/training.db-wal

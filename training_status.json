@@ -1,9 +1,9 @@
 {
-  "pipeline_run_id": null,
+  "pipeline_run_id": "20260502_185236",
   "stages": {
     "encoder_intuition": {
-      "status": "training",
-      "started_at": "2026-05-01T16:04:25.028154",
+      "status": "pending",
+      "started_at": null,
       "converged_at": null,
       "final_metric": null,
       "total_steps": null,

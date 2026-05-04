@@ -203,7 +203,10 @@ class JSONLCollector:
             with open(path, "r", encoding="utf-8") as f:
                 f.seek(offset)
                 last_good_pos = offset
-                for line in f:
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
                     stripped = line.strip()
                     if not stripped or stripped.startswith("#"):
                         last_good_pos = f.tell()

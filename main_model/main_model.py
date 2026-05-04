@@ -274,6 +274,57 @@ def encode_state(raw_state, weights):
     return z_t
 
 
+def encode_tensors(tensors, weights):
+    """
+    Encode pre-built state tensors into z_t [1, fused_dim].
+
+    Same as encode_state() but skips build_state_tensors() -- takes
+    the output of build_state_tensors() directly. Used by training
+    with preprocessed .pt data.
+
+    Input:
+    - tensors: dict with keys ego, scene, route, entities, mask
+    - weights: dict from create_encoder_weights()
+
+    Output:
+    - z_t: fused state embedding, shape [1, fused_dim]
+    """
+    ego_emb     = weights["ego_mlp"](tensors["ego"])
+    scene_emb   = weights["scene_mlp"](tensors["scene"])
+    route_emb   = weights["route_mlp"](tensors["route"])
+    entity_embs = weights["entity_mlp"](tensors["entities"])
+
+    query_input = torch.cat([ego_emb, scene_emb, route_emb], dim=-1)
+
+    attn1 = multi_head_attention(
+        query_input = query_input,
+        entity_embs = entity_embs,
+        mask        = tensors["mask"],
+        qw          = weights["qw1"],
+        kw          = weights["kw1"],
+        vw          = weights["vw1"],
+        ow          = weights["ow1"],
+        num_heads   = weights["num_heads"],
+    )
+    ctx1 = weights["ln_attn1"](attn1["entity_context"])
+
+    attn2 = multi_head_attention(
+        query_input = ctx1,
+        entity_embs = entity_embs,
+        mask        = tensors["mask"],
+        qw          = weights["qw2"],
+        kw          = weights["kw2"],
+        vw          = weights["vw2"],
+        ow          = weights["ow2"],
+        num_heads   = weights["num_heads"],
+    )
+    entity_context = weights["ln_attn2"](attn2["entity_context"] + ctx1)
+
+    fusion_input = torch.cat([ego_emb, scene_emb, route_emb, entity_context], dim=-1)
+    z_t = weights["fusion_mlp"](fusion_input)
+    return z_t
+
+
 # ---------------------------------------------------------------------------
 # get_candidates
 # ---------------------------------------------------------------------------
